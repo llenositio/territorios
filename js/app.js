@@ -96,15 +96,19 @@ async function bootstrap() {
     return;
   }
 
-  // 3. Si es Superadmin, cargar lista de congregaciones activas para poder cambiar entre ellas
+  // 3. Si es Superadmin, cargar lista de congregaciones activas con su ciudad
   if (isSuperadmin()) {
     const { data: activeSettings } = await supabase
       .from('terr_congregation_settings')
-      .select('congregation_id, congregaciones(id, nombre)');
+      .select('congregation_id, city, congregaciones(id, nombre)');
 
     superadminCongregations = (activeSettings || [])
-      .map((s) => s.congregaciones)
-      .filter(Boolean);
+      .filter((s) => s.congregaciones)
+      .map((s) => ({
+        id: s.congregaciones.id,
+        nombre: s.congregaciones.nombre,
+        city: s.city
+      }));
   }
 
   // 4. Usuario aprobado: cargar datos de la congregación y renderizar app (SIN pedir GPS automático)
@@ -116,7 +120,7 @@ async function switchSuperadminCongregation(newCongId) {
   const chosen = superadminCongregations.find((c) => c.id === newCongId);
   if (!chosen) return;
 
-  state.congregation = chosen;
+  state.congregation = { id: chosen.id, nombre: chosen.nombre };
   const { data: settings } = await supabase
     .from('terr_congregation_settings')
     .select('*')
@@ -126,7 +130,7 @@ async function switchSuperadminCongregation(newCongId) {
   state.settings = settings || null;
   await reloadAllData();
   renderMainShell();
-  showToast(`Cambiaste a ${chosen.nombre}`, 'info');
+  showToast(`Cambiaste a ${chosen.nombre} (${chosen.city})`, 'info');
 }
 
 async function reloadAllData() {
@@ -167,7 +171,7 @@ function renderMainShell() {
                       (c) =>
                         `<option value="${c.id}" ${
                           c.id === state.congregation?.id ? 'selected' : ''
-                        }>${escapeHtml(c.nombre)}</option>`
+                        }>${escapeHtml(c.nombre)} (${escapeHtml(c.city)})</option>`
                     )
                     .join('')}
                 </select>`
