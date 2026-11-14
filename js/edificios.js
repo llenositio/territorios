@@ -1,5 +1,6 @@
 import { supabase } from './supabase.js';
 import { state } from './state.js';
+import { requestOnDemandGps } from './app.js';
 import {
   showToast,
   getDistanceMeters,
@@ -123,20 +124,14 @@ export function renderEdificiosView(container) {
   `;
 
   document.getElementById('btn-gps-radar').onclick = () => {
-    if (!navigator.geolocation) {
-      showToast('Tu navegador no soporta GPS', 'error');
-      return;
-    }
     showToast('Buscando ubicación GPS...', 'info');
-    navigator.geolocation.getCurrentPosition(
-      (pos) => {
-        state.userLocation = { lat: pos.coords.latitude, lng: pos.coords.longitude };
+    requestOnDemandGps({
+      silent: false,
+      onSuccess: () => {
         showToast('Edificios ordenados por cercanía', 'success');
         renderEdificiosView(container);
-      },
-      () => showToast('Activá el permiso de ubicación en el celular', 'error'),
-      { enableHighAccuracy: true, timeout: 10000 }
-    );
+      }
+    });
   };
 
   document.getElementById('building-search').oninput = (e) => {
@@ -159,6 +154,7 @@ export function renderEdificiosView(container) {
       const bId = btn.getAttribute('data-building-id');
       selectedBuilding = state.buildings.find((x) => x.id === bId) || null;
       if (selectedBuilding) {
+        requestOnDemandGps({ silent: true });
         await fetchBuildingApartments(selectedBuilding.id);
         renderEdificiosView(container);
       }
@@ -192,27 +188,36 @@ async function fetchBuildingApartments(buildingId) {
 }
 
 function renderIntercomBoard(container) {
+  const currentApt = buildingApartments[0] || null;
+
   container.innerHTML = `
     <div class="space-y-4 pb-24">
+      <button id="btn-back-buildings"
+        class="w-full bg-slate-800 hover:bg-slate-700 active:scale-[0.99] text-white font-extrabold py-3.5 px-4 rounded-2xl text-sm flex items-center justify-center gap-2 shadow-sm transition">
+        <span>←</span>
+        <span>Volver a edificios</span>
+      </button>
+
       <div class="bg-blue-950 text-white p-4 rounded-2xl shadow-md flex items-center justify-between">
         <div>
-          <button id="btn-back-buildings" class="text-xs font-bold text-blue-200 hover:text-white mb-1">
-            ← Volver a edificios
-          </button>
           <h2 class="text-xl font-extrabold">
             ${escapeHtml(selectedBuilding.street)} ${escapeHtml(selectedBuilding.street_number)}
           </h2>
           <p class="text-xs text-blue-200 mt-0.5">
-            ${buildingApartments.length} timbres pendientes en cola
+            ${buildingApartments.length} ${
+              buildingApartments.length === 1 ? 'timbre pendiente' : 'timbres pendientes'
+            } en cola
           </p>
         </div>
-        <button id="btn-refresh-apts" class="bg-blue-800 hover:bg-blue-700 p-2.5 rounded-xl text-sm font-bold">
+        <button id="btn-refresh-apts"
+          class="bg-blue-800 hover:bg-blue-700 p-2.5 rounded-xl text-sm font-bold"
+          title="Actualizar cola">
           🔄
         </button>
       </div>
 
       ${
-        buildingApartments.length === 0
+        !currentApt
           ? `<div class="bg-emerald-50 border border-emerald-200 p-8 rounded-2xl text-center">
               <div class="text-4xl mb-2">✅</div>
               <h3 class="font-extrabold text-emerald-900 text-lg">¡Edificio al día!</h3>
@@ -220,53 +225,58 @@ function renderIntercomBoard(container) {
                 No quedan timbres pendientes o salteados para tocar ahora.
               </p>
             </div>`
-          : `<div class="space-y-3">
-              ${buildingApartments
-                .map(
-                  (apt) => `
-                  <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
-                    <div class="flex items-center justify-between">
-                      <span class="text-2xl font-black text-slate-900 tracking-tight">
-                        Timbre ${escapeHtml(apt.label)}
-                      </span>
-                      <span class="text-xs font-semibold px-2.5 py-1 rounded-full ${
-                        !apt.last_visited_at
-                          ? 'bg-rose-100 text-rose-800'
-                          : 'bg-slate-100 text-slate-600'
-                      }">
-                        ${formatRelativeDate(apt.last_visited_at)}
-                      </span>
-                    </div>
+          : `<div class="bg-white p-5 rounded-3xl shadow-md border border-slate-200 space-y-5">
+              <div class="text-center space-y-2 py-2">
+                <div class="text-xs font-extrabold uppercase tracking-wider text-blue-900">
+                  Próximo timbre sugerido
+                </div>
+                <div class="text-4xl font-black text-slate-900 tracking-tight">
+                  ${escapeHtml(currentApt.label)}
+                </div>
+                <div>
+                  <span class="inline-block text-xs font-semibold px-3 py-1 rounded-full ${
+                    !currentApt.last_visited_at
+                      ? 'bg-rose-100 text-rose-800'
+                      : 'bg-slate-100 text-slate-600'
+                  }">
+                    ${formatRelativeDate(currentApt.last_visited_at)}
+                  </span>
+                </div>
+              </div>
 
-                    <div class="grid grid-cols-4 gap-2">
-                      <button data-apt="${apt.id}" data-action="answered"
-                        class="apt-action-btn min-h-[52px] bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white font-bold rounded-xl text-xs flex flex-col items-center justify-center shadow-sm transition">
-                        <span class="text-base">✅</span>
-                        <span>Atendió</span>
-                      </button>
+              <div class="grid grid-cols-2 gap-2.5">
+                <button data-apt="${currentApt.id}" data-action="answered"
+                  class="apt-action-btn min-h-[58px] bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white font-extrabold rounded-2xl text-sm flex items-center justify-center gap-2 shadow-sm transition">
+                  <span>✅</span>
+                  <span>Atendió</span>
+                </button>
 
-                      <button data-apt="${apt.id}" data-action="no_answer"
-                        class="apt-action-btn min-h-[52px] bg-amber-500 hover:bg-amber-400 active:scale-95 text-slate-950 font-bold rounded-xl text-xs flex flex-col items-center justify-center shadow-sm transition">
-                        <span class="text-base">🔔</span>
-                        <span>No cont.</span>
-                      </button>
+                <button data-apt="${currentApt.id}" data-action="no_answer"
+                  class="apt-action-btn min-h-[58px] bg-amber-500 hover:bg-amber-400 active:scale-95 text-slate-950 font-extrabold rounded-2xl text-sm flex items-center justify-center gap-2 shadow-sm transition">
+                  <span>🔔</span>
+                  <span>No atendió</span>
+                </button>
+              </div>
 
-                      <button data-apt="${apt.id}" data-action="skipped"
-                        class="apt-action-btn min-h-[52px] bg-slate-200 hover:bg-slate-300 active:scale-95 text-slate-800 font-bold rounded-xl text-xs flex flex-col items-center justify-center transition">
-                        <span class="text-base">⏭️</span>
-                        <span>Saltear</span>
-                      </button>
+              <div class="grid grid-cols-3 gap-2">
+                <button data-apt="${currentApt.id}" data-action="skipped"
+                  class="apt-action-btn min-h-[52px] bg-slate-200 hover:bg-slate-300 active:scale-95 text-slate-800 font-bold rounded-xl text-xs flex flex-col items-center justify-center gap-0.5 transition">
+                  <span class="text-base">⏭️</span>
+                  <span>Saltear</span>
+                </button>
 
-                      <button data-apt="${apt.id}" data-label="${escapeHtml(apt.label)}"
-                        class="apt-config-btn min-h-[52px] bg-slate-100 hover:bg-rose-100 text-slate-600 hover:text-rose-700 font-bold rounded-xl text-xs flex flex-col items-center justify-center border border-slate-200 transition">
-                        <span class="text-base">⚙️</span>
-                        <span>Estado</span>
-                      </button>
-                    </div>
-                  </div>
-                `
-                )
-                .join('')}
+                <button data-apt="${currentApt.id}" data-action="do_not_visit"
+                  class="apt-action-btn min-h-[52px] bg-rose-100 hover:bg-rose-200 active:scale-95 text-rose-800 font-bold rounded-xl text-xs flex flex-col items-center justify-center gap-0.5 border border-rose-200 transition">
+                  <span class="text-base">🚫</span>
+                  <span>No visitar</span>
+                </button>
+
+                <button data-apt="${currentApt.id}" data-action="does_not_exist"
+                  class="apt-action-btn min-h-[52px] bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-700 font-bold rounded-xl text-xs flex flex-col items-center justify-center gap-0.5 border border-slate-200 transition">
+                  <span class="text-base">❓</span>
+                  <span>No existe</span>
+                </button>
+              </div>
             </div>`
       }
     </div>
@@ -287,21 +297,6 @@ function renderIntercomBoard(container) {
       const aptId = btn.getAttribute('data-apt');
       const action = btn.getAttribute('data-action');
       await handleApartmentAction(aptId, action, container);
-    };
-  });
-
-  document.querySelectorAll('.apt-config-btn').forEach((btn) => {
-    btn.onclick = async () => {
-      const aptId = btn.getAttribute('data-apt');
-      const label = btn.getAttribute('data-label');
-      const choice = prompt(
-        `Timbre ${label}:\nEscribí 1 para marcar "NO VISITAR"\nEscribí 2 para marcar "NO EXISTE"`
-      );
-      if (choice === '1') {
-        await handleApartmentAction(aptId, 'do_not_visit', container);
-      } else if (choice === '2') {
-        await handleApartmentAction(aptId, 'does_not_exist', container);
-      }
     };
   });
 }
@@ -338,14 +333,13 @@ async function handleApartmentAction(aptId, action, container) {
     action
   });
 
-  // Actualizar cola en pantalla inmediatamente
   buildingApartments = buildingApartments.filter((a) => a.id !== aptId);
   const labels = {
-    answered: 'Registrado: Atendieron',
-    no_answer: 'Registrado: No contestaron',
+    answered: 'Registrado: Atendió',
+    no_answer: 'Registrado: No atendió',
     skipped: 'Salteado por 48 horas',
-    do_not_visit: 'Marcado como No Visitar',
-    does_not_exist: 'Marcado como No Existe'
+    do_not_visit: 'Marcado como No visitar',
+    does_not_exist: 'Marcado como No existe'
   };
   showToast(labels[action] || 'Guardado', 'success');
   renderEdificiosView(container);
@@ -378,7 +372,7 @@ function renderNewBuildingModalHtml() {
           </div>
           <button type="submit" id="btn-submit-bldg-report"
             class="w-full bg-blue-900 hover:bg-blue-800 text-white font-bold py-3 rounded-xl text-sm shadow">
-            Enviar al Administrador con GPS
+            Enviar al Administrador
           </button>
         </form>
       </div>
@@ -400,54 +394,44 @@ function bindNewBuildingModalEvents(container) {
     const btn = document.getElementById('btn-submit-bldg-report');
 
     btn.disabled = true;
-    btn.textContent = 'Obteniendo GPS y enviando...';
+    btn.textContent = 'Enviando reporte...';
 
-    navigator.geolocation.getCurrentPosition(
-      async (pos) => {
-        let photoUrl = null;
-        if (photoFile) {
-          const ext = photoFile.name.split('.').pop() || 'jpg';
-          const filePath = `${state.congregation.id}/${Date.now()}.${ext}`;
-          const { error: upErr } = await supabase.storage
-            .from('terr-building-photos')
-            .upload(filePath, photoFile);
+    let photoUrl = null;
+    if (photoFile) {
+      const ext = photoFile.name.split('.').pop() || 'jpg';
+      const filePath = `${state.congregation.id}/${Date.now()}.${ext}`;
+      const { error: upErr } = await supabase.storage
+        .from('terr-building-photos')
+        .upload(filePath, photoFile);
 
-          if (!upErr) {
-            const { data: pub } = supabase.storage
-              .from('terr-building-photos')
-              .getPublicUrl(filePath);
-            photoUrl = pub?.publicUrl || null;
-          }
-        }
+      if (!upErr) {
+        const { data: pub } = supabase.storage
+          .from('terr-building-photos')
+          .getPublicUrl(filePath);
+        photoUrl = pub?.publicUrl || null;
+      }
+    }
 
-        const { error } = await supabase.from('terr_new_building_reports').insert({
-          congregation_id: state.congregation.id,
-          street,
-          street_number: streetNumber,
-          lat: pos.coords.latitude,
-          lng: pos.coords.longitude,
-          photo_url: photoUrl,
-          reported_by: state.profile.id,
-          status: 'pending'
-        });
+    const { error } = await supabase.from('terr_new_building_reports').insert({
+      congregation_id: state.congregation.id,
+      street,
+      street_number: streetNumber,
+      lat: null,
+      lng: null,
+      photo_url: photoUrl,
+      reported_by: state.profile.id,
+      status: 'pending'
+    });
 
-        if (error) {
-          showToast('Error al enviar reporte: ' + error.message, 'error');
-          btn.disabled = false;
-          btn.textContent = 'Enviar al Administrador con GPS';
-          return;
-        }
+    if (error) {
+      showToast('Error al enviar reporte: ' + error.message, 'error');
+      btn.disabled = false;
+      btn.textContent = 'Enviar al Administrador';
+      return;
+    }
 
-        showToast('¡Edificio reportado! El administrador lo revisará.', 'success');
-        showNewReportModal = false;
-        renderEdificiosView(container);
-      },
-      () => {
-        showToast('Necesitamos tu ubicación GPS para ubicar el edificio', 'error');
-        btn.disabled = false;
-        btn.textContent = 'Enviar al Administrador con GPS';
-      },
-      { enableHighAccuracy: true, timeout: 10000 }
-    );
+    showToast('¡Edificio reportado! El administrador lo revisará.', 'success');
+    showNewReportModal = false;
+    renderEdificiosView(container);
   };
 }
