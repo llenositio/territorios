@@ -1,5 +1,6 @@
 import { supabase } from './supabase.js';
 import { state } from './state.js';
+import { requestOnDemandGps } from './app.js';
 import {
   showToast,
   getDistanceMeters,
@@ -15,7 +16,12 @@ let showDnvModal = false;
 export async function loadBlocksAndFaces() {
   if (!state.congregation?.id) return;
 
-  const [subRes, blkRes, faceRes, dnvRes] = await Promise.all([
+  const [terrRes, subRes, blkRes, faceRes, dnvRes] = await Promise.all([
+    supabase
+      .from('terr_territories')
+      .select('*')
+      .eq('congregation_id', state.congregation.id)
+      .order('code_or_name', { ascending: true }),
     supabase
       .from('terr_subterritories')
       .select('*, terr_territories(code_or_name)')
@@ -37,6 +43,7 @@ export async function loadBlocksAndFaces() {
       .eq('congregation_id', state.congregation.id)
   ]);
 
+  if (!terrRes.error) state.territories = terrRes.data || [];
   if (!subRes.error) state.subterritories = subRes.data || [];
   if (!blkRes.error) state.blocks = blkRes.data || [];
   if (!faceRes.error) state.blockFaces = faceRes.data || [];
@@ -55,6 +62,19 @@ function getFaceAgeColor(lastCompletedAt) {
 }
 
 export function renderManzanasView(container) {
+  // Encender GPS bajo demanda al entrar a Manzanas para alertas de proximidad y mapa en vivo
+  if (!state.userLocation) {
+    requestOnDemandGps({
+      silent: true,
+      onSuccess: () => renderManzanasView(container)
+    });
+  }
+
+  const filteredSubterritories =
+    selectedSubterritoryId === 'ALL'
+      ? state.subterritories
+      : state.subterritories.filter((s) => s.id === selectedSubterritoryId);
+
   const filteredBlocks =
     selectedSubterritoryId === 'ALL'
       ? state.blocks
@@ -156,7 +176,7 @@ export function renderManzanasView(container) {
     ${showDnvModal ? renderDnvModalHtml() : ''}
   `;
 
-  initLeafletMap(filteredBlocks, filteredFaces);
+  initLeafletMap(filteredSubterritories, filteredBlocks, filteredFaces);
 
   document.getElementById('filter-subterritory').onchange = (e) => {
     selectedSubterritoryId = e.target.value;
@@ -180,7 +200,7 @@ export function renderManzanasView(container) {
   }
 }
 
-function initLeafletMap(blocks, faces) {
+function initLeafletMap(subterritories, blocks, faces) {
   const mapEl = document.getElementById('terr-leaflet-map');
   if (!mapEl || typeof window.L === 'undefined') return;
 
@@ -200,27 +220,48 @@ function initLeafletMap(blocks, faces) {
 
   const bounds = [];
 
-  // Dibujar caras de manzana con línea de color si tienen coordenadas
-  faces.forEach((face) => {
-    const colorInfo = getFaceAgeColor(face.last_completed_at);
-    if (Array.isArray(face.line_coords) && face.line_coords.length >= 2) {
-      const poly = window.L.polyline(face.line_coords, {
-        color: colorInfo.hex,
-        weight: 6,
-        opacity: 0.85
+  // 1. Dibujar polígonos de territorios generales (solo cuando se ven todos)
+  if (selectedSubterritoryId === 'ALL') {
+    state.territories.forEach((t) => {
+      if (Array.isArray(t.polygon_coords) && t.polygon_coords.length >= 3) {
+        const poly = window.L.polygon(t.polygon_coords, {
+          color: '#475569',
+          weight: 2,
+          dashArray: '6, 6',
+          fillOpacity: 0.04
+        }).addTo(leafletMap);
+        poly.bindPopup(`<b>${escapeHtml(t.code_or_name)}</b>`);
+        t.polygon_coords.forEach((pt) => bounds.push(pt));
+      }
+    });
+  }
+
+  // 2. Dibujar polígonos de subterritorios ("Territorio XX")
+  subterritories.forEach((sub) => {
+    if (Array.isArray(sub.polygon_coords) && sub.polygon_coords.length >= 3) {
+      const poly = window.L.polygon(sub.polygon_coords, {
+        color: '#1e3a8a',
+        weight: 3,
+        fillColor: '#3b82f6',
+        fillOpacity: 0.08
       }).addTo(leafletMap);
-      poly.bindPopup(
-        `<b>${escapeHtml(face.street_name)} ${escapeHtml(face.number_range || '')}</b><br>${formatRelativeDate(
-          face.last_completed_at
-        )}`
-      );
-      face.line_coords.forEach((pt) => bounds.push(pt));
+      poly.bindPopup(`<b>Territorio ${escapeHtml(sub.code)}</b>`);
+      sub.polygon_coords.forEach((pt) => bounds.push(pt));
     }
   });
 
-  // Dibujar marcadores de manzanas
+  // 3. Dibujar polígonos de manzanas ("Manzana X")
   blocks.forEach((b) => {
-    if (b.center_lat && b.center_lng) {
+    if (Array.isArray(b.polygon_coords) && b.polygon_coords.length >= 3) {
+      const poly = window.L.polygon(b.polygon_coords, {
+        color: '#334155',
+        weight: 1.5,
+        fillColor: '#94a3b8',
+        fillOpacity: 0.1
+      }).addTo(leafletMap);
+      poly.bindPopup(`<b>Manzana ${escapeHtml(b.name)}</b>`);
+      b.polygon_coords.forEach((pt) => bounds.push(pt));
+    } else if (b.center_lat && b.center_lng) {
       const marker = window.L.circleMarker([b.center_lat, b.center_lng], {
         radius: 8,
         color: '#1e3a8a',
@@ -232,7 +273,25 @@ function initLeafletMap(blocks, faces) {
     }
   });
 
-  // Dibujar casas No Visitar
+  // 4. Dibujar caras de manzana con línea de color según antigüedad
+  faces.forEach((face) => {
+    const colorInfo = getFaceAgeColor(face.last_completed_at);
+    if (Array.isArray(face.line_coords) && face.line_coords.length >= 2) {
+      const poly = window.L.polyline(face.line_coords, {
+        color: colorInfo.hex,
+        weight: 6,
+        opacity: 0.9
+      }).addTo(leafletMap);
+      poly.bindPopup(
+        `<b>${escapeHtml(face.street_name)} ${escapeHtml(face.number_range || '')}</b><br>${formatRelativeDate(
+          face.last_completed_at
+        )}`
+      );
+      face.line_coords.forEach((pt) => bounds.push(pt));
+    }
+  });
+
+  // 5. Dibujar casas No Visitar
   state.dnvHouses.forEach((h) => {
     if (h.lat && h.lng) {
       const dnvMarker = window.L.circleMarker([h.lat, h.lng], {
@@ -249,6 +308,19 @@ function initLeafletMap(blocks, faces) {
       bounds.push([h.lat, h.lng]);
     }
   });
+
+  // 6. Ubicación actual del publicador si activó GPS
+  if (state.userLocation) {
+    window.L.circleMarker([state.userLocation.lat, state.userLocation.lng], {
+      radius: 7,
+      color: '#ffffff',
+      weight: 2,
+      fillColor: '#2563eb',
+      fillOpacity: 1
+    })
+      .addTo(leafletMap)
+      .bindPopup('Tu ubicación actual');
+  }
 
   if (bounds.length > 0) {
     leafletMap.fitBounds(bounds, { padding: [25, 25], maxZoom: 16 });
@@ -286,7 +358,6 @@ async function markFaceCompleted(faceId, container) {
   renderManzanasView(container);
 }
 
-// Alerta automática por proximidad (<= 25 metros) a casas No Visitar
 export function checkDnvProximityAlert(lat, lng) {
   if (!state.dnvHouses?.length) return;
   for (const house of state.dnvHouses) {
