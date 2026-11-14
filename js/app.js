@@ -1,5 +1,5 @@
 import { state, isAdmin } from './state.js';
-import { escapeHtml } from './ui-helpers.js';
+import { escapeHtml, showToast } from './ui-helpers.js';
 import {
   loadUserSession,
   renderLoginScreen,
@@ -23,6 +23,47 @@ import { loadStatistics, renderEstadisticasView } from './estadisticas.js';
 
 const root = document.getElementById('app-root');
 let geoWatchId = null;
+
+// Activa el GPS únicamente bajo demanda (cuando el publicador está trabajando en la calle)
+export function requestOnDemandGps({ silent = false, onSuccess = null, onError = null } = {}) {
+  if (!navigator.geolocation) {
+    if (!silent) showToast('Tu navegador no soporta GPS', 'error');
+    if (onError) onError();
+    return;
+  }
+
+  navigator.geolocation.getCurrentPosition(
+    (pos) => {
+      state.userLocation = {
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude
+      };
+      checkDnvProximityAlert(pos.coords.latitude, pos.coords.longitude);
+      startGpsProximityWatcher();
+      if (onSuccess) onSuccess(state.userLocation);
+    },
+    (err) => {
+      if (!silent) showToast('Activá el permiso de ubicación en el celular', 'error');
+      if (onError) onError(err);
+    },
+    { enableHighAccuracy: true, timeout: 10000, maximumAge: 15000 }
+  );
+}
+
+function startGpsProximityWatcher() {
+  if (!navigator.geolocation || geoWatchId !== null) return;
+  geoWatchId = navigator.geolocation.watchPosition(
+    (pos) => {
+      state.userLocation = {
+        lat: pos.coords.latitude,
+        lng: pos.coords.longitude
+      };
+      checkDnvProximityAlert(pos.coords.latitude, pos.coords.longitude);
+    },
+    () => {},
+    { enableHighAccuracy: true, maximumAge: 15000 }
+  );
+}
 
 async function bootstrap() {
   // 1. Verificar si es acceso directo a cartelera pública (#/salidas/slug)
@@ -53,9 +94,8 @@ async function bootstrap() {
     return;
   }
 
-  // 3. Usuario aprobado: cargar datos de la congregación y renderizar app
+  // 3. Usuario aprobado: cargar datos de la congregación y renderizar app (SIN pedir GPS automático)
   await reloadAllData();
-  startGpsProximityWatcher();
   renderMainShell();
 }
 
@@ -70,21 +110,6 @@ async function reloadAllData() {
   }
   await Promise.all(tasks);
   await loadStatistics();
-}
-
-function startGpsProximityWatcher() {
-  if (!navigator.geolocation || geoWatchId !== null) return;
-  geoWatchId = navigator.geolocation.watchPosition(
-    (pos) => {
-      state.userLocation = {
-        lat: pos.coords.latitude,
-        lng: pos.coords.longitude
-      };
-      checkDnvProximityAlert(pos.coords.latitude, pos.coords.longitude);
-    },
-    () => {},
-    { enableHighAccuracy: true, maximumAge: 15000 }
-  );
 }
 
 function renderMainShell() {
