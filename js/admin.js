@@ -1,12 +1,22 @@
 import { supabase } from './supabase.js';
 import { state, isSuperadmin } from './state.js';
 import { showToast, escapeHtml } from './ui-helpers.js';
-import { renderImportadorHtml, bindImportadorEvents } from './importador.js';
+import {
+  renderImportadorHtml,
+  bindImportadorEvents,
+  geocodeAddress
+} from './importador.js';
 
-let congUsers = [];
+let pendingUsers = [];
+let allCongUsers = [];
 let pendingReports = [];
-let allCongregations = [];
-let activeCongSettings = [];
+let congregationsList = [];
+let adminSubTab = 'general';
+
+// Estado del mapeador poligonal por calles
+let polyPreviewCoords = [];
+let polyStreetNames = [];
+let polyPreviewMap = null;
 
 export async function loadAdminData() {
   if (!state.congregation?.id) return;
@@ -25,343 +35,846 @@ export async function loadAdminData() {
       .order('created_at', { ascending: false })
   ]);
 
-  if (!usersRes.error) congUsers = usersRes.data || [];
-  if (!repRes.error) pendingReports = repRes.data || [];
+  if (!usersRes.error) {
+    allCongUsers = usersRes.data || [];
+    pendingUsers = allCongUsers.filter((u) => u.status === 'pending');
+  }
+  if (!repRes.error) {
+    pendingReports = repRes.data || [];
+  }
 
   if (isSuperadmin()) {
-    const [cRes, sRes] = await Promise.all([
-      supabase.from('congregaciones').select('*').order('nombre', { ascending: true }),
-      supabase.from('terr_congregation_settings').select('*, congregaciones(id, nombre)')
-    ]);
-    if (!cRes.error) allCongregations = cRes.data || [];
-    if (!sRes.error) activeCongSettings = sRes.data || [];
+    const { data: congs } = await supabase
+      .from('congregaciones')
+      .select('id, nombre')
+      .order('nombre');
+    congregationsList = congs || [];
   }
 }
 
-export function renderAdminView(container, onReloadAll) {
+export function renderAdminView(container, onDataChanged) {
   const superMode = isSuperadmin();
 
   container.innerHTML = `
-    <div class="space-y-5 pb-24">
-      ${
-        superMode
-          ? `
-          <div class="bg-slate-900 text-white p-4 rounded-2xl shadow-md space-y-4">
-            <div class="flex items-center justify-between">
-              <span class="text-xs font-extrabold uppercase tracking-wider text-amber-400">
-                👑 Panel Superadministrador
-              </span>
-            </div>
-
-            <div>
-              <label class="block text-xs font-bold text-slate-300 mb-1">Congregación activa en pantalla</label>
-              <select id="super-switch-cong"
-                class="w-full px-3 py-2.5 rounded-xl bg-slate-800 border border-slate-700 text-white text-sm font-bold">
-                ${activeCongSettings
-                  .map(
-                    (s) =>
-                      `<option value="${s.congregation_id}" ${
-                        state.congregation?.id === s.congregation_id ? 'selected' : ''
-                      }>${escapeHtml(s.congregaciones?.nombre || s.slug)}</option>`
-                  )
-                  .join('')}
-              </select>
-            </div>
-
-            <form id="super-activate-cong-form" class="pt-3 border-t border-slate-800 space-y-2.5">
-              <p class="text-xs font-bold text-slate-200">Activar otra congregación existente en Territorios</p>
-              <select id="super-new-cong-id" required
-                class="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white text-xs">
-                <option value="">-- Elegir congregación --</option>
-                ${allCongregations
-                  .map((c) => `<option value="${c.id}">${escapeHtml(c.nombre)}</option>`)
-                  .join('')}
-              </select>
-              <div class="grid grid-cols-2 gap-2">
-                <input type="text" id="super-new-slug" required placeholder="slug (ej: centro-mdp)"
-                  class="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white text-xs" />
-                <input type="text" id="super-new-city" required value="Mar del Plata"
-                  class="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white text-xs" />
-              </div>
-              <button type="submit"
-                class="w-full bg-amber-500 hover:bg-amber-400 text-slate-950 font-bold py-2.5 rounded-xl text-xs">
-                Activar Congregación
-              </button>
-            </form>
-
-            <form id="super-create-admin-form" class="pt-3 border-t border-slate-800 space-y-2.5">
-              <p class="text-xs font-bold text-slate-200">Crear Cuenta de Administrador (Usuario y Contraseña)</p>
-              <div class="grid grid-cols-2 gap-2">
-                <input type="text" id="new-adm-user" required placeholder="Usuario (ej: admin_vdp)"
-                  class="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white text-xs" />
-                <input type="password" id="new-adm-pass" required placeholder="Contraseña"
-                  class="px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white text-xs" />
-              </div>
-              <input type="text" id="new-adm-name" required placeholder="Nombre completo del Administrador"
-                class="w-full px-3 py-2 rounded-xl bg-slate-800 border border-slate-700 text-white text-xs" />
-              <button type="submit"
-                class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-bold py-2.5 rounded-xl text-xs">
-                Crear Admin para ${escapeHtml(state.congregation?.nombre || 'esta congregación')}
-              </button>
-            </form>
-          </div>
-        `
-          : ''
-      }
-
-      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
-        <h3 class="text-base font-extrabold text-slate-900">
-          🏢 Edificios Nuevos Reportados (${pendingReports.length})
-        </h3>
-        ${
-          pendingReports.length === 0
-            ? `<p class="text-xs text-slate-500">No hay reportes pendientes de revisión.</p>`
-            : `<div class="space-y-3">
-                ${pendingReports
-                  .map(
-                    (rep) => `
-                    <div class="p-3.5 rounded-xl border border-amber-200 bg-amber-50/40 space-y-2">
-                      <div class="flex items-start justify-between gap-2">
-                        <div>
-                          <div class="font-extrabold text-slate-900 text-sm">
-                            ${escapeHtml(rep.street)} ${escapeHtml(rep.street_number)}
-                          </div>
-                          <div class="text-[11px] text-slate-500">
-                            GPS: ${rep.lat.toFixed(5)}, ${rep.lng.toFixed(5)}
-                          </div>
-                        </div>
-                        ${
-                          rep.photo_url
-                            ? `<a href="${rep.photo_url}" target="_blank" class="text-xs font-bold text-blue-800 underline">Ver foto 📷</a>`
-                            : ''
-                        }
-                      </div>
-
-                      <div class="flex gap-2 pt-1">
-                        <button data-rep-id="${rep.id}"
-                          class="approve-rep-btn flex-1 bg-emerald-600 text-white font-bold py-2 rounded-lg text-xs">
-                          ✓ Aprobar y cargar timbres
-                        </button>
-                        <button data-rep-id="${rep.id}"
-                          class="reject-rep-btn bg-slate-200 text-slate-700 font-bold px-3 py-2 rounded-lg text-xs">
-                          Descartar
-                        </button>
-                      </div>
-                    </div>
-                  `
-                  )
-                  .join('')}
-              </div>`
-        }
+    <div class="space-y-4 pb-24">
+      <div class="grid grid-cols-4 gap-1 bg-slate-200 p-1 rounded-2xl">
+        <button data-subtab="general"
+          class="admin-subtab-btn py-2 rounded-xl text-[11px] font-extrabold transition ${
+            adminSubTab === 'general' ? 'bg-white text-blue-950 shadow-sm' : 'text-slate-600'
+          }">
+          ⚙️ Config
+        </button>
+        <button data-subtab="mapa"
+          class="admin-subtab-btn py-2 rounded-xl text-[11px] font-extrabold transition ${
+            adminSubTab === 'mapa' ? 'bg-white text-blue-950 shadow-sm' : 'text-slate-600'
+          }">
+          🗺️ Polígonos
+        </button>
+        <button data-subtab="usuarios"
+          class="admin-subtab-btn py-2 rounded-xl text-[11px] font-extrabold transition relative ${
+            adminSubTab === 'usuarios' ? 'bg-white text-blue-950 shadow-sm' : 'text-slate-600'
+          }">
+          👥 Usuarios
+          ${
+            pendingUsers.length > 0
+              ? `<span class="ml-0.5 bg-rose-600 text-white text-[10px] px-1.5 py-0.2 rounded-full">${pendingUsers.length}</span>`
+              : ''
+          }
+        </button>
+        <button data-subtab="edificios"
+          class="admin-subtab-btn py-2 rounded-xl text-[11px] font-extrabold transition relative ${
+            adminSubTab === 'edificios' ? 'bg-white text-blue-950 shadow-sm' : 'text-slate-600'
+          }">
+          🏢 Edificios
+          ${
+            pendingReports.length > 0
+              ? `<span class="ml-0.5 bg-amber-500 text-slate-950 text-[10px] px-1.5 py-0.2 rounded-full">${pendingReports.length}</span>`
+              : ''
+          }
+        </button>
       </div>
 
-      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
-        <h3 class="text-base font-extrabold text-slate-900">
-          👥 Hermanos de la Congregación (${congUsers.length})
-        </h3>
-        ${
-          congUsers.length === 0
-            ? `<p class="text-xs text-slate-500">Aún no hay hermanos registrados en esta congregación.</p>`
-            : `<div class="space-y-2.5">
-                ${congUsers
-                  .map(
-                    (u) => `
-                    <div class="p-3 rounded-xl border border-slate-200 flex items-center justify-between gap-2">
-                      <div class="min-w-0">
-                        <div class="font-bold text-slate-900 text-sm truncate">${escapeHtml(
-                          u.full_name || u.email
-                        )}</div>
-                        <div class="text-[11px] text-slate-500 truncate">${escapeHtml(u.email)}</div>
-                        <div class="flex items-center gap-1.5 mt-1">
-                          <span class="text-[10px] font-extrabold uppercase px-2 py-0.5 rounded ${
-                            u.status === 'approved'
-                              ? 'bg-emerald-100 text-emerald-800'
-                              : u.status === 'pending'
-                              ? 'bg-amber-100 text-amber-800'
-                              : 'bg-rose-100 text-rose-800'
-                          }">${u.status}</span>
-                          <span class="text-[10px] font-bold uppercase px-2 py-0.5 rounded bg-slate-100 text-slate-700">${
-                            u.role
-                          }</span>
-                        </div>
-                      </div>
-
-                      <div class="flex flex-col gap-1 shrink-0">
-                        ${
-                          u.status !== 'approved'
-                            ? `<button data-uid="${u.id}" data-new-status="approved"
-                                class="user-status-btn bg-emerald-600 text-white font-bold px-3 py-1.5 rounded-lg text-xs">
-                                Habilitar
-                              </button>`
-                            : `<button data-uid="${u.id}" data-new-status="blocked"
-                                class="user-status-btn bg-rose-100 text-rose-700 font-bold px-3 py-1.5 rounded-lg text-xs">
-                                Bloquear
-                              </button>`
-                        }
-                        <select data-uid="${u.id}"
-                          class="user-role-select text-[11px] font-bold border border-slate-300 rounded-lg px-2 py-1 bg-white">
-                          <option value="publicador" ${u.role === 'publicador' ? 'selected' : ''}>Publicador</option>
-                          <option value="conductor" ${u.role === 'conductor' ? 'selected' : ''}>Conductor</option>
-                          <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
-                        </select>
-                      </div>
-                    </div>
-                  `
-                  )
-                  .join('')}
-              </div>`
-        }
-      </div>
-
-      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
-        <h3 class="text-base font-extrabold text-slate-900">📅 Cartelera Pública y Puntos de Encuentro</h3>
-        <form id="cartelera-dates-form" class="space-y-2.5">
-          <div class="grid grid-cols-2 gap-2">
-            <div>
-              <label class="block text-[11px] font-bold text-slate-600 mb-1">Publicar desde</label>
-              <input type="date" id="set-pub-start" value="${state.settings?.public_schedule_start_date || ''}"
-                class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs" />
-            </div>
-            <div>
-              <label class="block text-[11px] font-bold text-slate-600 mb-1">Publicar hasta</label>
-              <input type="date" id="set-pub-end" value="${state.settings?.public_schedule_end_date || ''}"
-                class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs" />
-            </div>
-          </div>
-          <button type="submit"
-            class="w-full bg-blue-900 text-white font-bold py-2.5 rounded-xl text-xs">
-            Guardar Fechas de Cartelera Pública
-          </button>
-        </form>
-
-        <div class="pt-3 border-t border-slate-100 space-y-2">
-          <label class="block text-xs font-bold text-slate-700">Agregar Punto de Encuentro</label>
-          <div class="flex gap-2">
-            <input type="text" id="new-mp-input" placeholder="Ej: Salón del Reino (Calle 123)"
-              class="flex-1 px-3 py-2 rounded-xl border border-slate-300 text-xs" />
-            <button id="btn-add-mp" class="bg-slate-800 text-white font-bold px-3.5 py-2 rounded-xl text-xs">
-              Agregar
-            </button>
-          </div>
-          <div class="flex flex-wrap gap-1.5 pt-1">
-            ${state.meetingPoints
-              .map(
-                (mp) =>
-                  `<span class="inline-flex items-center gap-1.5 bg-slate-100 text-slate-700 text-xs px-2.5 py-1 rounded-lg">
-                    ${escapeHtml(mp.name_and_address)}
-                    <button data-mp-id="${mp.id}" class="del-mp-btn text-rose-600 font-bold">✕</button>
-                  </span>`
-              )
-              .join('')}
-          </div>
-        </div>
-      </div>
-
-      ${renderImportadorHtml()}
+      ${adminSubTab === 'general' ? renderGeneralAdminHtml(superMode) : ''}
+      ${adminSubTab === 'mapa' ? renderPolygonMapperHtml() : ''}
+      ${adminSubTab === 'usuarios' ? renderUsersAdminHtml() : ''}
+      ${adminSubTab === 'edificios' ? renderBuildingsAdminHtml() : ''}
     </div>
   `;
 
-  bindImportadorEvents(onReloadAll);
-
-  // Eventos Superadmin
-  if (superMode) {
-    document.getElementById('super-switch-cong').onchange = async (e) => {
-      const newCongId = e.target.value;
-      const found = activeCongSettings.find((s) => s.congregation_id === newCongId);
-      if (found) {
-        state.congregation = found.congregaciones;
-        state.settings = found;
-        showToast(`Cambiado a ${found.congregaciones?.nombre}`, 'info');
-        await onReloadAll();
-      }
+  document.querySelectorAll('.admin-subtab-btn').forEach((btn) => {
+    btn.onclick = () => {
+      adminSubTab = btn.getAttribute('data-subtab');
+      renderAdminView(container, onDataChanged);
     };
+  });
 
-    document.getElementById('super-activate-cong-form').onsubmit = async (e) => {
+  if (adminSubTab === 'general') bindGeneralAdminEvents(container, onDataChanged, superMode);
+  if (adminSubTab === 'mapa') bindPolygonMapperEvents(container, onDataChanged);
+  if (adminSubTab === 'usuarios') bindUsersAdminEvents(container);
+  if (adminSubTab === 'edificios') bindBuildingsAdminEvents(container, onDataChanged);
+}
+
+// ============================================================================
+// SUBPESTAÑA 1: CONFIGURACIÓN Y PUNTOS DE ENCUENTRO
+// ============================================================================
+function renderGeneralAdminHtml(superMode) {
+  return `
+    <div class="space-y-4">
+      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
+        <h3 class="text-base font-extrabold text-slate-900">📅 Cartelera Pública de Salidas</h3>
+        <form id="public-dates-form" class="space-y-3">
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">Mostrar desde</label>
+              <input type="date" id="pub-start-date" value="${
+                state.settings?.public_schedule_start_date || ''
+              }" class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">Mostrar hasta</label>
+              <input type="date" id="pub-end-date" value="${
+                state.settings?.public_schedule_end_date || ''
+              }" class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm" />
+            </div>
+          </div>
+          <button type="submit"
+            class="w-full bg-blue-900 hover:bg-blue-800 text-white font-bold py-2.5 rounded-xl text-xs shadow">
+            Guardar fechas de cartelera
+          </button>
+        </form>
+      </div>
+
+      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
+        <h3 class="text-base font-extrabold text-slate-900">📍 Puntos de Encuentro Frecuentes</h3>
+        <form id="add-mp-form" class="flex gap-2">
+          <input type="text" id="new-mp-input" required placeholder="Ej: Salón del Reino / Plaza Mitre"
+            class="flex-1 px-3 py-2 rounded-xl border border-slate-300 text-xs" />
+          <button type="submit"
+            class="bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3.5 py-2 rounded-xl text-xs">
+            + Agregar
+          </button>
+        </form>
+
+        <div class="space-y-1.5">
+          ${state.meetingPoints
+            .map(
+              (mp) => `
+              <div class="flex items-center justify-between bg-slate-50 px-3 py-2 rounded-xl border border-slate-200 text-xs">
+                <span class="font-semibold text-slate-800">${escapeHtml(mp.name_and_address)}</span>
+                <button data-del-mp="${mp.id}" class="del-mp-btn text-rose-600 font-bold px-1.5">✕</button>
+              </div>
+            `
+            )
+            .join('')}
+        </div>
+      </div>
+
+      ${
+        superMode
+          ? `<div class="bg-blue-950 text-white p-4 rounded-2xl shadow space-y-3">
+              <h3 class="text-base font-extrabold">👑 Superadmin: Crear Administrador</h3>
+              <form id="create-admin-form" class="space-y-2.5">
+                <select id="sa-cong-select" required
+                  class="w-full px-3 py-2 rounded-xl text-slate-900 text-xs font-bold bg-white">
+                  <option value="">-- Elegir Congregación --</option>
+                  ${congregationsList
+                    .map(
+                      (c) =>
+                        `<option value="${c.id}" ${
+                          c.id === state.congregation?.id ? 'selected' : ''
+                        }>${escapeHtml(c.nombre)}</option>`
+                    )
+                    .join('')}
+                </select>
+                <input type="text" id="sa-fullname" required placeholder="Nombre completo del hermano"
+                  class="w-full px-3 py-2 rounded-xl text-slate-900 text-xs" />
+                <div class="grid grid-cols-2 gap-2">
+                  <input type="text" id="sa-username" required placeholder="Usuario (ej: juan.perez)"
+                    class="w-full px-3 py-2 rounded-xl text-slate-900 text-xs" />
+                  <input type="text" id="sa-password" required minlength="6" placeholder="Contraseña (mín 6)"
+                    class="w-full px-3 py-2 rounded-xl text-slate-900 text-xs" />
+                </div>
+                <button type="submit"
+                  class="w-full bg-amber-400 hover:bg-amber-300 text-slate-950 font-extrabold py-2.5 rounded-xl text-xs">
+                  Crear Cuenta de Administrador
+                </button>
+              </form>
+            </div>`
+          : ''
+      }
+    </div>
+  `;
+}
+
+function bindGeneralAdminEvents(container, onDataChanged, superMode) {
+  document.getElementById('public-dates-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const start = document.getElementById('pub-start-date').value || null;
+    const end = document.getElementById('pub-end-date').value || null;
+
+    const { error } = await supabase
+      .from('terr_congregation_settings')
+      .update({
+        public_schedule_start_date: start,
+        public_schedule_end_date: end
+      })
+      .eq('congregation_id', state.congregation.id);
+
+    if (error) {
+      showToast('Error al guardar fechas: ' + error.message, 'error');
+      return;
+    }
+
+    state.settings.public_schedule_start_date = start;
+    state.settings.public_schedule_end_date = end;
+    showToast('Fechas de cartelera pública actualizadas', 'success');
+  };
+
+  document.getElementById('add-mp-form').onsubmit = async (e) => {
+    e.preventDefault();
+    const text = document.getElementById('new-mp-input').value.trim();
+    if (!text) return;
+
+    const { data, error } = await supabase
+      .from('terr_meeting_points')
+      .insert({
+        congregation_id: state.congregation.id,
+        name_and_address: text
+      })
+      .select()
+      .single();
+
+    if (!error && data) {
+      state.meetingPoints.push(data);
+      showToast('Punto de encuentro agregado', 'success');
+      renderAdminView(container, onDataChanged);
+    }
+  };
+
+  document.querySelectorAll('.del-mp-btn').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.getAttribute('data-del-mp');
+      await supabase.from('terr_meeting_points').delete().eq('id', id);
+      state.meetingPoints = state.meetingPoints.filter((x) => x.id !== id);
+      renderAdminView(container, onDataChanged);
+    };
+  });
+
+  if (superMode) {
+    document.getElementById('create-admin-form').onsubmit = async (e) => {
       e.preventDefault();
-      const congId = document.getElementById('super-new-cong-id').value;
-      const slug = document.getElementById('super-new-slug').value.trim().toLowerCase();
-      const city = document.getElementById('super-new-city').value.trim();
+      const congId = document.getElementById('sa-cong-select').value;
+      const fullName = document.getElementById('sa-fullname').value.trim();
+      const username = document.getElementById('sa-username').value.trim();
+      const password = document.getElementById('sa-password').value;
 
-      const { error } = await supabase.from('terr_congregation_settings').upsert({
-        congregation_id: congId,
-        slug,
-        city,
-        country: 'Argentina'
+      const { error } = await supabase.rpc('terr_create_admin_account', {
+        p_username: username,
+        p_password: password,
+        p_full_name: fullName,
+        p_congregation_id: congId
       });
 
       if (error) {
         showToast('Error: ' + error.message, 'error');
         return;
       }
-      showToast('Congregación activada', 'success');
-      await loadAdminData();
-      renderAdminView(container, onReloadAll);
+
+      showToast(`Admin "${username}" creado correctamente`, 'success');
+      document.getElementById('create-admin-form').reset();
     };
+  }
+}
 
-    document.getElementById('super-create-admin-form').onsubmit = async (e) => {
-      e.preventDefault();
-      const username = document.getElementById('new-adm-user').value.trim();
-      const password = document.getElementById('new-adm-pass').value;
-      const fullName = document.getElementById('new-adm-name').value.trim();
+// ============================================================================
+// SUBPESTAÑA 2: MAPEADOR DE TERRITORIOS, SUBTERRITORIOS Y MANZANAS POR CALLES
+// ============================================================================
+function renderPolygonMapperHtml() {
+  const city = state.settings?.city || 'Mar del Plata';
 
-      const { error } = await supabase.rpc('terr_create_admin_account', {
-        p_username: username,
-        p_password: password,
-        p_full_name: fullName,
-        p_congregation_id: state.congregation.id
+  return `
+    <div class="space-y-4">
+      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
+        <div>
+          <h3 class="text-base font-extrabold text-slate-900">🗺️ Mapear por Calles Perimetrales</h3>
+          <p class="text-xs text-slate-500 mt-0.5">
+            Ingresá las calles en orden alrededor del perímetro (3, 4, 8 o las que formen el polígono).
+            El sistema detectará las intersecciones en <b>${escapeHtml(city)}</b>.
+          </p>
+        </div>
+
+        <div class="space-y-2.5">
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1">¿Qué querés mapear?</label>
+            <select id="poly-entity-type"
+              class="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-xs font-bold bg-white">
+              <option value="territory">Territorio (de ${escapeHtml(state.congregation?.nombre || '')})</option>
+              <option value="subterritory" selected>Subterritorio ("Territorio XX" de ${escapeHtml(
+                state.congregation?.nombre || ''
+              )})</option>
+              <option value="block">Manzana ("Manzana X" dentro de un Territorio)</option>
+            </select>
+          </div>
+
+          <div id="poly-parent-territory-box" class="hidden">
+            <label class="block text-xs font-bold text-slate-700 mb-1">Territorio padre (opcional)</label>
+            <select id="poly-parent-territory"
+              class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white">
+              <option value="">-- Ninguno / Independiente --</option>
+              ${state.territories
+                .map((t) => `<option value="${t.id}">${escapeHtml(t.code_or_name)}</option>`)
+                .join('')}
+            </select>
+          </div>
+
+          <div id="poly-parent-subterritory-box" class="hidden">
+            <label class="block text-xs font-bold text-slate-700 mb-1">Pertenece al Territorio *</label>
+            <select id="poly-parent-subterritory"
+              class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white">
+              <option value="">-- Elegir Territorio --</option>
+              ${state.subterritories
+                .map((s) => `<option value="${s.id}">Territorio ${escapeHtml(s.code)}</option>`)
+                .join('')}
+            </select>
+          </div>
+
+          <div class="grid grid-cols-2 gap-2">
+            <div>
+              <label id="poly-name-label" class="block text-xs font-bold text-slate-700 mb-1">
+                Código / Número (ej: 4A)
+              </label>
+              <input type="text" id="poly-entity-name" placeholder="Ej: 4A"
+                class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs font-bold" />
+            </div>
+            <div>
+              <label class="block text-xs font-bold text-slate-700 mb-1">Ciudad</label>
+              <input type="text" id="poly-city" value="${escapeHtml(city)}"
+                class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs" />
+            </div>
+          </div>
+
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1">
+              Calles del perímetro en orden (separadas por coma o una por línea)
+            </label>
+            <textarea id="poly-streets-input" rows="4"
+              placeholder="Ej: 3 de Febrero, Santa Fe, Av Colón, Córdoba, Alvarado, 20 de Septiembre, Av Pedro Luro, Av Independencia"
+              class="w-full p-3 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-800 outline-none">${escapeHtml(
+                polyStreetNames.join(', ')
+              )}</textarea>
+          </div>
+
+          <button type="button" id="btn-calc-polygon"
+            class="w-full bg-blue-900 hover:bg-blue-800 text-white font-bold py-3 rounded-xl text-xs shadow transition">
+            🔍 Calcular intersecciones y previsualizar en mapa
+          </button>
+        </div>
+
+        <div id="poly-preview-section" class="${polyPreviewCoords.length >= 3 ? '' : 'hidden'} space-y-2.5 pt-2">
+          <div class="flex items-center justify-between text-xs">
+            <span class="font-bold text-emerald-700">
+              ✅ Polígono de ${polyPreviewCoords.length} lados listo (podés arrastrar los puntos blancos para ajustar)
+            </span>
+          </div>
+          <div id="admin-poly-map" class="w-full h-64 rounded-xl border border-slate-300 z-10"></div>
+          <button type="button" id="btn-save-polygon"
+            class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold py-3 rounded-xl text-sm shadow">
+            💾 Guardar en la Congregación
+          </button>
+        </div>
+      </div>
+
+      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-2">
+        <h4 class="text-xs font-extrabold uppercase text-slate-500">
+          Territorios y Manzanas cargados
+        </h4>
+        <div class="text-xs text-slate-600 space-y-1">
+          <div>• <b>Territorios generales:</b> ${state.territories.length}</div>
+          <div>• <b>Subterritorios ("Territorio XX"):</b> ${state.subterritories.length}</div>
+          <div>• <b>Manzanas mapeadas:</b> ${state.blocks.length} (${state.blockFaces.length} cuadras)</div>
+        </div>
+      </div>
+    </div>
+  `;
+}
+
+function parsePerimeterStreets(raw) {
+  return raw
+    .split(/[\n,;]+/)
+    .map((s) => s.trim())
+    .filter(Boolean);
+}
+
+// Busca la intersección exacta entre dos calles usando Overpass API (OpenStreetMap)
+async function findStreetIntersection(streetA, streetB, city) {
+  const cleanA = streetA.replace(/"/g, '\\"');
+  const cleanB = streetB.replace(/"/g, '\\"');
+  const cleanCity = city.replace(/"/g, '\\"');
+
+  const overpassQuery = `
+    [out:json][timeout:15];
+    area["name"~"${cleanCity}",i]["boundary"="administrative"]->.searchArea;
+    way(area.searchArea)["highway"]["name"~"${cleanA}",i]->.w1;
+    way(area.searchArea)["highway"]["name"~"${cleanB}",i]->.w2;
+    node(w.w1)(w.w2);
+    out body 1;
+  `;
+
+  try {
+    const res = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      body: 'data=' + encodeURIComponent(overpassQuery)
+    });
+    const data = await res.json();
+    if (Array.isArray(data.elements) && data.elements.length > 0) {
+      return [data.elements[0].lat, data.elements[0].lon];
+    }
+  } catch (e) {
+    console.warn('Overpass fallback para:', streetA, streetB, e);
+  }
+
+  // Respaldo con Nominatim si Overpass no encontró nodo compartido
+  try {
+    const q = encodeURIComponent(`${streetA} & ${streetB}, ${city}, ${state.settings?.country || 'Argentina'}`);
+    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${q}`, {
+      headers: { 'Accept-Language': 'es' }
+    });
+    const list = await res.json();
+    if (Array.isArray(list) && list.length > 0) {
+      return [parseFloat(list[0].lat), parseFloat(list[0].lon)];
+    }
+  } catch (e) {
+    console.warn('Nominatim intersection error:', e);
+  }
+
+  return null;
+}
+
+function initAdminPolyPreviewMap() {
+  const mapEl = document.getElementById('admin-poly-map');
+  if (!mapEl || typeof window.L === 'undefined' || polyPreviewCoords.length < 3) return;
+
+  if (polyPreviewMap) {
+    polyPreviewMap.remove();
+    polyPreviewMap = null;
+  }
+
+  polyPreviewMap = window.L.map('admin-poly-map').setView(polyPreviewCoords[0], 15);
+  window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
+    maxZoom: 19,
+    attribution: '© OpenStreetMap'
+  }).addTo(polyPreviewMap);
+
+  const polygonLayer = window.L.polygon(polyPreviewCoords, {
+    color: '#1e3a8a',
+    fillColor: '#3b82f6',
+    fillOpacity: 0.25,
+    weight: 4
+  }).addTo(polyPreviewMap);
+
+  polyPreviewCoords.forEach((pt, idx) => {
+    const nextStreet = polyStreetNames[(idx + 1) % polyStreetNames.length] || '';
+    const marker = window.L.marker(pt, {
+      draggable: true,
+      title: `Esquina: ${polyStreetNames[idx]} y ${nextStreet}`
+    }).addTo(polyPreviewMap);
+
+    marker.bindPopup(`<b>Esquina ${idx + 1}</b><br>${escapeHtml(polyStreetNames[idx])} y ${escapeHtml(nextStreet)}`);
+
+    marker.on('dragend', (ev) => {
+      const pos = ev.target.getLatLng();
+      polyPreviewCoords[idx] = [pos.lat, pos.lng];
+      polygonLayer.setLatLngs(polyPreviewCoords);
+    });
+  });
+
+  polyPreviewMap.fitBounds(polygonLayer.getBounds(), { padding: [25, 25] });
+}
+
+function bindPolygonMapperEvents(container, onDataChanged) {
+  const typeSelect = document.getElementById('poly-entity-type');
+  const parentTerrBox = document.getElementById('poly-parent-territory-box');
+  const parentSubBox = document.getElementById('poly-parent-subterritory-box');
+  const nameLabel = document.getElementById('poly-name-label');
+  const nameInput = document.getElementById('poly-entity-name');
+
+  const syncTypeFields = () => {
+    const val = typeSelect.value;
+    parentTerrBox.classList.toggle('hidden', val !== 'subterritory');
+    parentSubBox.classList.toggle('hidden', val !== 'block');
+
+    if (val === 'territory') {
+      nameLabel.textContent = 'Nombre o número de Territorio';
+      nameInput.placeholder = 'Ej: Zona Centro / Territorio 4';
+    } else if (val === 'subterritory') {
+      nameLabel.textContent = 'Código de Territorio (ej: 4A)';
+      nameInput.placeholder = 'Ej: 4A';
+    } else {
+      nameLabel.textContent = 'Nombre o número de Manzana';
+      nameInput.placeholder = 'Ej: 12';
+    }
+  };
+
+  typeSelect.onchange = syncTypeFields;
+  syncTypeFields();
+
+  if (polyPreviewCoords.length >= 3) {
+    setTimeout(initAdminPolyPreviewMap, 50);
+  }
+
+  document.getElementById('btn-calc-polygon').onclick = async () => {
+    const rawStreets = document.getElementById('poly-streets-input').value;
+    const streets = parsePerimeterStreets(rawStreets);
+    const city = document.getElementById('poly-city').value.trim() || state.settings?.city || 'Mar del Plata';
+
+    if (streets.length < 3) {
+      showToast('Ingresá al menos 3 calles que formen un perímetro cerrado', 'error');
+      return;
+    }
+
+    const btn = document.getElementById('btn-calc-polygon');
+    btn.disabled = true;
+    btn.textContent = `Calculando ${streets.length} intersecciones...`;
+
+    const coords = [];
+    for (let i = 0; i < streets.length; i++) {
+      const s1 = streets[i];
+      const s2 = streets[(i + 1) % streets.length];
+      btn.textContent = `Buscando esquina ${i + 1}/${streets.length}: ${s1} y ${s2}...`;
+      const pt = await findStreetIntersection(s1, s2, city);
+      if (pt) {
+        coords.push(pt);
+      } else {
+        showToast(`No se encontró cruce exacto: ${s1} y ${s2}. Revisá el nombre.`, 'warning');
+      }
+    }
+
+    btn.disabled = false;
+    btn.textContent = '🔍 Calcular intersecciones y previsualizar en mapa';
+
+    if (coords.length < 3) {
+      showToast('Se necesitan al menos 3 esquinas válidas para armar el polígono', 'error');
+      return;
+    }
+
+    polyStreetNames = streets;
+    polyPreviewCoords = coords;
+    document.getElementById('poly-preview-section').classList.remove('hidden');
+    initAdminPolyPreviewMap();
+    showToast(`Polígono calculado con ${coords.length} vértices`, 'success');
+  };
+
+  document.getElementById('btn-save-polygon').onclick = async () => {
+    const entityType = typeSelect.value;
+    const entityName = nameInput.value.trim();
+
+    if (!entityName) {
+      showToast('Ingresá el nombre o número antes de guardar', 'error');
+      return;
+    }
+    if (polyPreviewCoords.length < 3) {
+      showToast('Primero calculá el polígono en el mapa', 'error');
+      return;
+    }
+
+    const saveBtn = document.getElementById('btn-save-polygon');
+    saveBtn.disabled = true;
+    saveBtn.textContent = 'Guardando...';
+
+    if (entityType === 'territory') {
+      const { error } = await supabase.from('terr_territories').insert({
+        congregation_id: state.congregation.id,
+        code_or_name: entityName,
+        polygon_coords: polyPreviewCoords
       });
-
       if (error) {
-        showToast('Error creando admin: ' + error.message, 'error');
+        showToast('Error al guardar territorio: ' + error.message, 'error');
+        saveBtn.disabled = false;
+        saveBtn.textContent = '💾 Guardar en la Congregación';
+        return;
+      }
+      showToast(`Territorio "${entityName}" guardado`, 'success');
+    } else if (entityType === 'subterritory') {
+      const parentTerrId = document.getElementById('poly-parent-territory').value || null;
+      const { error } = await supabase.from('terr_subterritories').insert({
+        congregation_id: state.congregation.id,
+        territory_id: parentTerrId,
+        code: entityName,
+        polygon_coords: polyPreviewCoords
+      });
+      if (error) {
+        showToast('Error al guardar Territorio: ' + error.message, 'error');
+        saveBtn.disabled = false;
+        saveBtn.textContent = '💾 Guardar en la Congregación';
+        return;
+      }
+      showToast(`Territorio "${entityName}" guardado en la congregación`, 'success');
+    } else if (entityType === 'block') {
+      const subId = document.getElementById('poly-parent-subterritory').value;
+      if (!subId) {
+        showToast('Elegí a qué Territorio pertenece esta manzana', 'error');
+        saveBtn.disabled = false;
+        saveBtn.textContent = '💾 Guardar en la Congregación';
         return;
       }
 
-      showToast(`Administrador "${username}" creado correctamente`, 'success');
-      e.target.reset();
-      await loadAdminData();
-      renderAdminView(container, onReloadAll);
-    };
-  }
+      // Calcular centroide de la manzana
+      const avgLat =
+        polyPreviewCoords.reduce((acc, p) => acc + p[0], 0) / polyPreviewCoords.length;
+      const avgLng =
+        polyPreviewCoords.reduce((acc, p) => acc + p[1], 0) / polyPreviewCoords.length;
 
-  // Aprobar / Rechazar reporte de edificio nuevo
+      const { data: newBlock, error: blkErr } = await supabase
+        .from('terr_blocks')
+        .insert({
+          congregation_id: state.congregation.id,
+          subterritory_id: subId,
+          name: entityName,
+          center_lat: avgLat,
+          center_lng: avgLng,
+          polygon_coords: polyPreviewCoords
+        })
+        .select()
+        .single();
+
+      if (blkErr || !newBlock) {
+        showToast('Error al guardar manzana: ' + (blkErr?.message || ''), 'error');
+        saveBtn.disabled = false;
+        saveBtn.textContent = '💾 Guardar en la Congregación';
+        return;
+      }
+
+      // Crear las N caras de la manzana (una por cada lado del polígono)
+      const facesPayload = polyPreviewCoords.map((pt, i) => {
+        const nextPt = polyPreviewCoords[(i + 1) % polyPreviewCoords.length];
+        const streetLabel = polyStreetNames[(i + 1) % polyStreetNames.length] || `Cara ${i + 1}`;
+        return {
+          congregation_id: state.congregation.id,
+          block_id: newBlock.id,
+          street_name: streetLabel,
+          line_coords: [pt, nextPt]
+        };
+      });
+
+      await supabase.from('terr_block_faces').insert(facesPayload);
+      showToast(`Manzana "${entityName}" guardada con ${facesPayload.length} caras`, 'success');
+    }
+
+    polyPreviewCoords = [];
+    polyStreetNames = [];
+    if (onDataChanged) await onDataChanged();
+  };
+}
+
+// ============================================================================
+// SUBPESTAÑA 3: GESTIÓN DE USUARIOS
+// ============================================================================
+function renderUsersAdminHtml() {
+  return `
+    <div class="space-y-4">
+      ${
+        pendingUsers.length > 0
+          ? `<div class="bg-amber-50 border border-amber-300 p-4 rounded-2xl space-y-2.5">
+              <h3 class="text-sm font-extrabold text-amber-950">⏳ Solicitudes Pendientes (${pendingUsers.length})</h3>
+              ${pendingUsers
+                .map(
+                  (u) => `
+                  <div class="bg-white p-3 rounded-xl border border-amber-200 flex items-center justify-between gap-2">
+                    <div>
+                      <div class="font-bold text-sm text-slate-900">${escapeHtml(u.full_name || 'Sin nombre')}</div>
+                      <div class="text-xs text-slate-500">${escapeHtml(u.email)}</div>
+                    </div>
+                    <div class="flex gap-1.5">
+                      <button data-approve-user="${u.id}"
+                        class="approve-user-btn bg-emerald-600 text-white font-bold px-3 py-1.5 rounded-lg text-xs">
+                        Aprobar
+                      </button>
+                      <button data-block-user="${u.id}"
+                        class="block-user-btn bg-rose-100 text-rose-700 font-bold px-2.5 py-1.5 rounded-lg text-xs">
+                        Rechazar
+                      </button>
+                    </div>
+                  </div>
+                `
+                )
+                .join('')}
+            </div>`
+          : ''
+      }
+
+      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-2.5">
+        <h3 class="text-base font-extrabold text-slate-900">👥 Hermanos de la Congregación</h3>
+        ${allCongUsers
+          .filter((u) => u.status !== 'pending')
+          .map(
+            (u) => `
+            <div class="flex items-center justify-between py-2 border-b border-slate-100 last:border-0 text-xs">
+              <div>
+                <div class="font-bold text-slate-900">${escapeHtml(u.full_name || u.email)}</div>
+                <div class="text-slate-400">${escapeHtml(u.email)}</div>
+              </div>
+              <select data-role-user="${u.id}"
+                class="change-role-select px-2.5 py-1.5 rounded-lg border border-slate-300 font-bold bg-white">
+                <option value="publicador" ${u.role === 'publicador' ? 'selected' : ''}>Publicador</option>
+                <option value="conductor" ${u.role === 'conductor' ? 'selected' : ''}>Conductor</option>
+                <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
+              </select>
+            </div>
+          `
+          )
+          .join('')}
+      </div>
+    </div>
+  `;
+}
+
+function bindUsersAdminEvents(container) {
+  document.querySelectorAll('.approve-user-btn').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.getAttribute('data-approve-user');
+      await supabase.from('terr_users').update({ status: 'approved' }).eq('id', id);
+      showToast('Hermano aprobado', 'success');
+      await loadAdminData();
+      renderAdminView(container);
+    };
+  });
+
+  document.querySelectorAll('.block-user-btn').forEach((btn) => {
+    btn.onclick = async () => {
+      const id = btn.getAttribute('data-block-user');
+      await supabase.from('terr_users').update({ status: 'blocked' }).eq('id', id);
+      showToast('Solicitud rechazada', 'info');
+      await loadAdminData();
+      renderAdminView(container);
+    };
+  });
+
+  document.querySelectorAll('.change-role-select').forEach((sel) => {
+    sel.onchange = async () => {
+      const id = sel.getAttribute('data-role-user');
+      await supabase.from('terr_users').update({ role: sel.value }).eq('id', id);
+      showToast('Rol actualizado', 'success');
+    };
+  });
+}
+
+// ============================================================================
+// SUBPESTAÑA 4: EDIFICIOS NUEVOS REPORTADOS E IMPORTADOR MASIVO
+// ============================================================================
+function renderBuildingsAdminHtml() {
+  return `
+    <div class="space-y-4">
+      ${
+        pendingReports.length > 0
+          ? `<div class="bg-amber-50 border border-amber-300 p-4 rounded-2xl space-y-3">
+              <h3 class="text-sm font-extrabold text-amber-950">🏗️ Edificios Reportados por Hermanos (${pendingReports.length})</h3>
+              ${pendingReports
+                .map(
+                  (r) => `
+                  <div class="bg-white p-3.5 rounded-xl border border-amber-200 space-y-2.5">
+                    <div class="flex items-start justify-between">
+                      <div>
+                        <div class="font-extrabold text-sm text-slate-900">
+                          ${escapeHtml(r.street)} ${escapeHtml(r.street_number)}
+                        </div>
+                        <div class="text-[11px] text-slate-500">
+                          Ubicación GPS se calculará por dirección al aprobar
+                        </div>
+                      </div>
+                      ${
+                        r.photo_url
+                          ? `<a href="${r.photo_url}" target="_blank"
+                              class="text-xs font-bold text-blue-900 underline">📷 Ver foto</a>`
+                          : ''
+                      }
+                    </div>
+
+                    <div>
+                      <label class="block text-[11px] font-bold text-slate-600 mb-1">Asignar a Territorio</label>
+                      <select id="rep-sub-${r.id}"
+                        class="w-full px-3 py-1.5 rounded-lg border border-slate-300 text-xs bg-white">
+                        <option value="">-- Sin territorio asignado --</option>
+                        ${state.subterritories
+                          .map((s) => `<option value="${s.id}">Territorio ${escapeHtml(s.code)}</option>`)
+                          .join('')}
+                      </select>
+                    </div>
+
+                    <input type="text" id="rep-apts-${r.id}"
+                      placeholder="Timbres separados por coma (ej: 1A, 1B, 2A, 2B)"
+                      class="w-full px-3 py-2 rounded-lg border border-slate-300 text-xs" />
+
+                    <div class="flex gap-2">
+                      <button data-approve-rep="${r.id}"
+                        class="approve-rep-btn flex-1 bg-emerald-600 text-white font-bold py-2 rounded-lg text-xs">
+                        ✓ Geocodificar y Aprobar
+                      </button>
+                      <button data-reject-rep="${r.id}"
+                        class="reject-rep-btn bg-rose-100 text-rose-700 font-bold px-3 py-2 rounded-lg text-xs">
+                        Descartar
+                      </button>
+                    </div>
+                  </div>
+                `
+                )
+                .join('')}
+            </div>`
+          : ''
+      }
+
+      ${renderImportadorHtml()}
+    </div>
+  `;
+}
+
+function bindBuildingsAdminEvents(container, onDataChanged) {
   document.querySelectorAll('.approve-rep-btn').forEach((btn) => {
     btn.onclick = async () => {
-      const repId = btn.getAttribute('data-rep-id');
-      const rep = pendingReports.find((r) => r.id === repId);
+      const repId = btn.getAttribute('data-approve-rep');
+      const rep = pendingReports.find((x) => x.id === repId);
       if (!rep) return;
 
-      const aptStr = prompt(
-        `Aprobar ${rep.street} ${rep.street_number}.\nIngresá los timbres separados por coma (ej: PB A, PB B, 1A, 1B):`
-      );
-      if (aptStr === null) return;
+      btn.disabled = true;
+      btn.textContent = 'Ubicando dirección...';
 
-      const { data: bldg, error } = await supabase
+      const subId = document.getElementById(`rep-sub-${repId}`)?.value || null;
+      const aptsRaw = document.getElementById(`rep-apts-${repId}`)?.value || '';
+      const aptList = aptsRaw
+        .split(',')
+        .map((x) => x.trim())
+        .filter(Boolean);
+
+      const coords =
+        rep.lat && rep.lng
+          ? { lat: rep.lat, lng: rep.lng }
+          : await geocodeAddress(rep.street, rep.street_number);
+
+      const { data: newBldg, error } = await supabase
         .from('terr_buildings')
         .insert({
           congregation_id: state.congregation.id,
+          subterritory_id: subId,
           street: rep.street,
           street_number: rep.street_number,
-          lat: rep.lat,
-          lng: rep.lng,
+          lat: coords.lat,
+          lng: coords.lng,
           status: 'active'
         })
         .select()
         .single();
 
-      if (error) {
-        showToast('Error al crear edificio: ' + error.message, 'error');
+      if (error || !newBldg) {
+        showToast('Error al aprobar edificio: ' + (error?.message || ''), 'error');
+        btn.disabled = false;
+        btn.textContent = '✓ Geocodificar y Aprobar';
         return;
       }
 
-      const labels = aptStr
-        .split(',')
-        .map((x) => x.trim())
-        .filter(Boolean);
-      if (labels.length > 0) {
+      if (aptList.length > 0) {
         await supabase.from('terr_apartments').insert(
-          labels.map((label) => ({
+          aptList.map((label) => ({
             congregation_id: state.congregation.id,
-            building_id: bldg.id,
+            building_id: newBldg.id,
             label,
             status: 'active'
           }))
@@ -373,97 +886,28 @@ export function renderAdminView(container, onReloadAll) {
         .update({ status: 'approved' })
         .eq('id', repId);
 
-      showToast('Edificio aprobado y agregado al mapa', 'success');
-      await onReloadAll();
+      showToast(
+        coords.lat
+          ? 'Edificio ubicado en GPS y aprobado'
+          : 'Edificio aprobado (no se halló altura exacta en mapa)',
+        'success'
+      );
+      if (onDataChanged) await onDataChanged();
     };
   });
 
   document.querySelectorAll('.reject-rep-btn').forEach((btn) => {
     btn.onclick = async () => {
-      const repId = btn.getAttribute('data-rep-id');
+      const repId = btn.getAttribute('data-reject-rep');
       await supabase
         .from('terr_new_building_reports')
         .update({ status: 'rejected' })
         .eq('id', repId);
-      pendingReports = pendingReports.filter((r) => r.id !== repId);
-      renderAdminView(container, onReloadAll);
+      showToast('Reporte descartado', 'info');
+      await loadAdminData();
+      renderAdminView(container, onDataChanged);
     };
   });
 
-  // Gestión de usuarios
-  document.querySelectorAll('.user-status-btn').forEach((btn) => {
-    btn.onclick = async () => {
-      const uid = btn.getAttribute('data-uid');
-      const newStatus = btn.getAttribute('data-new-status');
-      const { error } = await supabase
-        .from('terr_users')
-        .update({ status: newStatus })
-        .eq('id', uid);
-      if (!error) {
-        showToast('Estado actualizado', 'success');
-        await loadAdminData();
-        renderAdminView(container, onReloadAll);
-      }
-    };
-  });
-
-  document.querySelectorAll('.user-role-select').forEach((sel) => {
-    sel.onchange = async () => {
-      const uid = sel.getAttribute('data-uid');
-      const newRole = sel.value;
-      const { error } = await supabase
-        .from('terr_users')
-        .update({ role: newRole })
-        .eq('id', uid);
-      if (!error) {
-        showToast('Rol actualizado a ' + newRole, 'success');
-        await loadAdminData();
-      }
-    };
-  });
-
-  // Fechas cartelera pública
-  document.getElementById('cartelera-dates-form').onsubmit = async (e) => {
-    e.preventDefault();
-    const start = document.getElementById('set-pub-start').value || null;
-    const end = document.getElementById('set-pub-end').value || null;
-
-    const { error } = await supabase
-      .from('terr_congregation_settings')
-      .update({
-        public_schedule_start_date: start,
-        public_schedule_end_date: end
-      })
-      .eq('congregation_id', state.congregation.id);
-
-    if (!error) {
-      state.settings.public_schedule_start_date = start;
-      state.settings.public_schedule_end_date = end;
-      showToast('Fechas de cartelera pública guardadas', 'success');
-    }
-  };
-
-  // Puntos de encuentro
-  document.getElementById('btn-add-mp').onclick = async () => {
-    const val = document.getElementById('new-mp-input').value.trim();
-    if (!val) return;
-    const { data, error } = await supabase
-      .from('terr_meeting_points')
-      .insert({ congregation_id: state.congregation.id, name_and_address: val })
-      .select()
-      .single();
-    if (!error && data) {
-      state.meetingPoints.push(data);
-      renderAdminView(container, onReloadAll);
-    }
-  };
-
-  document.querySelectorAll('.del-mp-btn').forEach((btn) => {
-    btn.onclick = async () => {
-      const id = btn.getAttribute('data-mp-id');
-      await supabase.from('terr_meeting_points').delete().eq('id', id);
-      state.meetingPoints = state.meetingPoints.filter((m) => m.id !== id);
-      renderAdminView(container, onReloadAll);
-    };
-  });
+  bindImportadorEvents(onDataChanged);
 }
