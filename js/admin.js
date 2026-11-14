@@ -360,7 +360,7 @@ function renderPolygonMapperHtml() {
               Calles del perímetro en orden (separadas por coma o una por línea)
             </label>
             <textarea id="poly-streets-input" rows="4"
-              placeholder="Ej: 3 de Febrero, Santa Fe, Av Colón, Córdoba, Alvarado, 20 de Septiembre, Av Pedro Luro, Av Independencia"
+              placeholder="Ej: 3 de Febrero, Santa Fe, Av Colón, Córdoba, Alvarado, Av Independencia, Av Colón, 20 de Septiembre, Av Pedro Luro, Av Independencia"
               class="w-full p-3 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-800 outline-none">${escapeHtml(
                 polyStreetNames.join(', ')
               )}</textarea>
@@ -407,16 +407,22 @@ function parsePerimeterStreets(raw) {
     .filter(Boolean);
 }
 
-// Normaliza abreviaturas comunes para que coincidan con OpenStreetMap
-function normalizeStreetName(name) {
-  return name
+function normalizeStreetRegex(name) {
+  let clean = name
     .trim()
-    .replace(/^av\.?\s+/i, 'Avenida ')
-    .replace(/^bv\.?\s+/i, 'Boulevard ')
+    .replace(/^av\.?\s+/i, '(Avenida|Av\\.?) ')
+    .replace(/^bv\.?\s+/i, '(Boulevard|Bv\\.?) ')
     .replace(/"/g, '\\"');
+  clean = clean
+    .replace(/[aá]/gi, '[aá]')
+    .replace(/[eé]/gi, '[eé]')
+    .replace(/[ií]/gi, '[ií]')
+    .replace(/[oó]/gi, '[oó]')
+    .replace(/[uú]/gi, '[uú]');
+  return clean;
 }
 
-// Busca TODAS las intersecciones del perímetro en paralelo alrededor del centro de la ciudad
+// UNA sola consulta unificada a Overpass para todo el perímetro (evita bloqueo 429)
 async function findAllPerimeterIntersections(streets, city) {
   const country = state.settings?.country || 'Argentina';
 
@@ -436,39 +442,45 @@ async function findAllPerimeterIntersections(streets, city) {
     }
   } catch (_) {}
 
-  const resolveSingleCorner = async (streetA, streetB) => {
-    const normA = normalizeStreetName(streetA);
-    const normB = normalizeStreetName(streetB);
+  const uniqueStreets = [...new Set(streets)];
+  const wayDefs = uniqueStreets
+    .map((st, idx) => {
+      const rx = normalizeStreetRegex(st);
+      return `way(around:18000,${centerLat},${centerLon})["highway"]["name"~"${rx}",i]->.s${idx};`;
+    })
+    .join('\n    ');
 
-    const q = `
-      [out:json][timeout:8];
-      way(around:18000,${centerLat},${centerLon})["highway"]["name"~"${normA}",i]->.w1;
-      way(around:18000,${centerLat},${centerLon})["highway"]["name"~"${normB}",i]->.w2;
-      node(w.w1)(w.w2);
-      out body 1;
-    `;
+  const cornerDefs = streets
+    .map((s1, i) => {
+      const s2 = streets[(i + 1) % streets.length];
+      const idx1 = uniqueStreets.indexOf(s1);
+      const idx2 = uniqueStreets.indexOf(s2);
+      return `node(w.s${idx1})(w.s${idx2})->.c${i};\n    .c${i} out body 1;`;
+    })
+    .join('\n    ');
 
-    try {
-      const ctrl = new AbortController();
-      const timer = setTimeout(() => ctrl.abort(), 8500);
-      const res = await fetch('https://overpass-api.de/api/interpreter', {
-        method: 'POST',
-        body: 'data=' + encodeURIComponent(q),
-        signal: ctrl.signal
-      });
-      clearTimeout(timer);
-      const data = await res.json();
-      if (Array.isArray(data.elements) && data.elements.length > 0) {
-        return [data.elements[0].lat, data.elements[0].lon];
-      }
-    } catch (_) {}
+  const singleBatchQuery = `
+    [out:json][timeout:15];
+    ${wayDefs}
+    ${cornerDefs}
+  `;
 
-    return null;
-  };
+  try {
+    const res = await fetch('https://overpass-api.de/api/interpreter', {
+      method: 'POST',
+      body: 'data=' + encodeURIComponent(singleBatchQuery)
+    });
+    const data = await res.json();
+    const nodes = (data.elements || []).filter((el) => el.type === 'node');
 
-  return Promise.all(
-    streets.map((s1, i) => resolveSingleCorner(s1, streets[(i + 1) % streets.length]))
-  );
+    if (nodes.length >= 3) {
+      return nodes.map((n) => [n.lat, n.lon]);
+    }
+  } catch (e) {
+    console.warn('Error en consulta Overpass unificada:', e);
+  }
+
+  return [];
 }
 
 function initAdminPolyPreviewMap() {
@@ -555,26 +567,15 @@ function bindPolygonMapperEvents(container, onDataChanged) {
 
     const btn = document.getElementById('btn-calc-polygon');
     btn.disabled = true;
-    btn.textContent = `Calculando ${streets.length} esquinas en paralelo...`;
+    btn.textContent = `Buscando ${streets.length} esquinas en 1 consulta...`;
 
-    const results = await findAllPerimeterIntersections(streets, city);
-    const coords = [];
-
-    results.forEach((pt, i) => {
-      const s1 = streets[i];
-      const s2 = streets[(i + 1) % streets.length];
-      if (pt) {
-        coords.push(pt);
-      } else {
-        showToast(`No se encontró cruce exacto: ${s1} y ${s2}. Revisá el nombre.`, 'warning');
-      }
-    });
+    const coords = await findAllPerimeterIntersections(streets, city);
 
     btn.disabled = false;
     btn.textContent = '🔍 Calcular intersecciones y previsualizar en mapa';
 
     if (coords.length < 3) {
-      showToast('Se necesitan al menos 3 esquinas válidas para armar el polígono', 'error');
+      showToast('No se pudieron detectar las esquinas automáticamente. Revisá los nombres de calles.', 'error');
       return;
     }
 
