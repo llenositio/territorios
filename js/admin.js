@@ -407,49 +407,68 @@ function parsePerimeterStreets(raw) {
     .filter(Boolean);
 }
 
-// Busca la intersección exacta entre dos calles usando Overpass API (OpenStreetMap)
-async function findStreetIntersection(streetA, streetB, city) {
-  const cleanA = streetA.replace(/"/g, '\\"');
-  const cleanB = streetB.replace(/"/g, '\\"');
-  const cleanCity = city.replace(/"/g, '\\"');
+// Normaliza abreviaturas comunes para que coincidan con OpenStreetMap
+function normalizeStreetName(name) {
+  return name
+    .trim()
+    .replace(/^av\.?\s+/i, 'Avenida ')
+    .replace(/^bv\.?\s+/i, 'Boulevard ')
+    .replace(/"/g, '\\"');
+}
 
-  const overpassQuery = `
-    [out:json][timeout:15];
-    area["name"~"${cleanCity}",i]["boundary"="administrative"]->.searchArea;
-    way(area.searchArea)["highway"]["name"~"${cleanA}",i]->.w1;
-    way(area.searchArea)["highway"]["name"~"${cleanB}",i]->.w2;
-    node(w.w1)(w.w2);
-    out body 1;
-  `;
+// Busca TODAS las intersecciones del perímetro en paralelo alrededor del centro de la ciudad
+async function findAllPerimeterIntersections(streets, city) {
+  const country = state.settings?.country || 'Argentina';
 
+  let centerLat = -38.0055;
+  let centerLon = -57.5426;
   try {
-    const res = await fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      body: 'data=' + encodeURIComponent(overpassQuery)
-    });
-    const data = await res.json();
-    if (Array.isArray(data.elements) && data.elements.length > 0) {
-      return [data.elements[0].lat, data.elements[0].lon];
+    const cityRes = await fetch(
+      `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
+        `${city}, ${country}`
+      )}`,
+      { headers: { 'Accept-Language': 'es' } }
+    );
+    const cityData = await cityRes.json();
+    if (Array.isArray(cityData) && cityData.length > 0) {
+      centerLat = parseFloat(cityData[0].lat);
+      centerLon = parseFloat(cityData[0].lon);
     }
-  } catch (e) {
-    console.warn('Overpass fallback para:', streetA, streetB, e);
-  }
+  } catch (_) {}
 
-  // Respaldo con Nominatim si Overpass no encontró nodo compartido
-  try {
-    const q = encodeURIComponent(`${streetA} & ${streetB}, ${city}, ${state.settings?.country || 'Argentina'}`);
-    const res = await fetch(`https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${q}`, {
-      headers: { 'Accept-Language': 'es' }
-    });
-    const list = await res.json();
-    if (Array.isArray(list) && list.length > 0) {
-      return [parseFloat(list[0].lat), parseFloat(list[0].lon)];
-    }
-  } catch (e) {
-    console.warn('Nominatim intersection error:', e);
-  }
+  const resolveSingleCorner = async (streetA, streetB) => {
+    const normA = normalizeStreetName(streetA);
+    const normB = normalizeStreetName(streetB);
 
-  return null;
+    const q = `
+      [out:json][timeout:8];
+      way(around:18000,${centerLat},${centerLon})["highway"]["name"~"${normA}",i]->.w1;
+      way(around:18000,${centerLat},${centerLon})["highway"]["name"~"${normB}",i]->.w2;
+      node(w.w1)(w.w2);
+      out body 1;
+    `;
+
+    try {
+      const ctrl = new AbortController();
+      const timer = setTimeout(() => ctrl.abort(), 8500);
+      const res = await fetch('https://overpass-api.de/api/interpreter', {
+        method: 'POST',
+        body: 'data=' + encodeURIComponent(q),
+        signal: ctrl.signal
+      });
+      clearTimeout(timer);
+      const data = await res.json();
+      if (Array.isArray(data.elements) && data.elements.length > 0) {
+        return [data.elements[0].lat, data.elements[0].lon];
+      }
+    } catch (_) {}
+
+    return null;
+  };
+
+  return Promise.all(
+    streets.map((s1, i) => resolveSingleCorner(s1, streets[(i + 1) % streets.length]))
+  );
 }
 
 function initAdminPolyPreviewMap() {
@@ -536,20 +555,20 @@ function bindPolygonMapperEvents(container, onDataChanged) {
 
     const btn = document.getElementById('btn-calc-polygon');
     btn.disabled = true;
-    btn.textContent = `Calculando ${streets.length} intersecciones...`;
+    btn.textContent = `Calculando ${streets.length} esquinas en paralelo...`;
 
+    const results = await findAllPerimeterIntersections(streets, city);
     const coords = [];
-    for (let i = 0; i < streets.length; i++) {
+
+    results.forEach((pt, i) => {
       const s1 = streets[i];
       const s2 = streets[(i + 1) % streets.length];
-      btn.textContent = `Buscando esquina ${i + 1}/${streets.length}: ${s1} y ${s2}...`;
-      const pt = await findStreetIntersection(s1, s2, city);
       if (pt) {
         coords.push(pt);
       } else {
         showToast(`No se encontró cruce exacto: ${s1} y ${s2}. Revisá el nombre.`, 'warning');
       }
-    }
+    });
 
     btn.disabled = false;
     btn.textContent = '🔍 Calcular intersecciones y previsualizar en mapa';
@@ -620,7 +639,6 @@ function bindPolygonMapperEvents(container, onDataChanged) {
         return;
       }
 
-      // Calcular centroide de la manzana
       const avgLat =
         polyPreviewCoords.reduce((acc, p) => acc + p[0], 0) / polyPreviewCoords.length;
       const avgLng =
@@ -646,7 +664,6 @@ function bindPolygonMapperEvents(container, onDataChanged) {
         return;
       }
 
-      // Crear las N caras de la manzana (una por cada lado del polígono)
       const facesPayload = polyPreviewCoords.map((pt, i) => {
         const nextPt = polyPreviewCoords[(i + 1) % polyPreviewCoords.length];
         const streetLabel = polyStreetNames[(i + 1) % polyStreetNames.length] || `Cara ${i + 1}`;
