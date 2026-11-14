@@ -1,4 +1,5 @@
-import { state, isAdmin } from './state.js';
+import { supabase } from './supabase.js';
+import { state, isAdmin, isSuperadmin } from './state.js';
 import { escapeHtml, showToast } from './ui-helpers.js';
 import {
   loadUserSession,
@@ -23,6 +24,7 @@ import { loadStatistics, renderEstadisticasView } from './estadisticas.js';
 
 const root = document.getElementById('app-root');
 let geoWatchId = null;
+let superadminCongregations = [];
 
 // Activa el GPS únicamente bajo demanda (cuando el publicador está trabajando en la calle)
 export function requestOnDemandGps({ silent = false, onSuccess = null, onError = null } = {}) {
@@ -94,9 +96,37 @@ async function bootstrap() {
     return;
   }
 
-  // 3. Usuario aprobado: cargar datos de la congregación y renderizar app (SIN pedir GPS automático)
+  // 3. Si es Superadmin, cargar lista de congregaciones activas para poder cambiar entre ellas
+  if (isSuperadmin()) {
+    const { data: activeSettings } = await supabase
+      .from('terr_congregation_settings')
+      .select('congregation_id, congregaciones(id, nombre)');
+
+    superadminCongregations = (activeSettings || [])
+      .map((s) => s.congregaciones)
+      .filter(Boolean);
+  }
+
+  // 4. Usuario aprobado: cargar datos de la congregación y renderizar app (SIN pedir GPS automático)
   await reloadAllData();
   renderMainShell();
+}
+
+async function switchSuperadminCongregation(newCongId) {
+  const chosen = superadminCongregations.find((c) => c.id === newCongId);
+  if (!chosen) return;
+
+  state.congregation = chosen;
+  const { data: settings } = await supabase
+    .from('terr_congregation_settings')
+    .select('*')
+    .eq('congregation_id', chosen.id)
+    .maybeSingle();
+
+  state.settings = settings || null;
+  await reloadAllData();
+  renderMainShell();
+  showToast(`Cambiaste a ${chosen.nombre}`, 'info');
 }
 
 async function reloadAllData() {
@@ -114,6 +144,7 @@ async function reloadAllData() {
 
 function renderMainShell() {
   const adminMode = isAdmin();
+  const superMode = isSuperadmin();
 
   const tabs = [
     { id: 'edificios', icon: '🏢', label: 'Edificios' },
@@ -125,17 +156,31 @@ function renderMainShell() {
 
   root.innerHTML = `
     <div class="min-h-screen bg-slate-100 flex flex-col">
-      <header class="bg-blue-950 text-white px-4 py-3.5 shadow-md sticky top-0 z-30 flex items-center justify-between print:hidden">
-        <div>
-          <h1 class="text-base font-black tracking-tight leading-tight">
-            ${escapeHtml(state.congregation?.nombre || 'Territorios')}
-          </h1>
-          <p class="text-[11px] text-blue-200">
+      <header class="bg-blue-950 text-white px-4 py-3.5 shadow-md sticky top-0 z-30 flex items-center justify-between gap-2 print:hidden">
+        <div class="min-w-0 flex-1">
+          ${
+            superMode && superadminCongregations.length > 0
+              ? `<select id="superadmin-cong-switcher"
+                  class="bg-blue-900 text-white font-black text-sm px-2.5 py-1 rounded-xl border border-blue-700 outline-none max-w-full">
+                  ${superadminCongregations
+                    .map(
+                      (c) =>
+                        `<option value="${c.id}" ${
+                          c.id === state.congregation?.id ? 'selected' : ''
+                        }>${escapeHtml(c.nombre)}</option>`
+                    )
+                    .join('')}
+                </select>`
+              : `<h1 class="text-base font-black tracking-tight leading-tight truncate">
+                  ${escapeHtml(state.congregation?.nombre || 'Territorios')}
+                </h1>`
+          }
+          <p class="text-[11px] text-blue-200 mt-0.5 truncate">
             ${escapeHtml(state.profile?.full_name || state.profile?.email || '')}
           </p>
         </div>
         <button id="btn-header-logout"
-          class="text-xs font-bold bg-blue-900 hover:bg-blue-800 px-3 py-1.5 rounded-xl border border-blue-800">
+          class="text-xs font-bold bg-blue-900 hover:bg-blue-800 px-3 py-1.5 rounded-xl border border-blue-800 shrink-0">
           Salir
         </button>
       </header>
@@ -163,6 +208,11 @@ function renderMainShell() {
       </nav>
     </div>
   `;
+
+  const congSwitcher = document.getElementById('superadmin-cong-switcher');
+  if (congSwitcher) {
+    congSwitcher.onchange = (e) => switchSuperadminCongregation(e.target.value);
+  }
 
   document.getElementById('btn-header-logout').onclick = signOut;
 
