@@ -16,7 +16,6 @@ function parseInputRows(rawText) {
   const separator = lines[0].includes('\t') ? '\t' : lines[0].includes(';') ? ';' : ',';
   const rows = lines.map((line) => line.split(separator).map((c) => c.trim().replace(/^"|"$/g, '')));
 
-  // Detectar si la primera fila es encabezado
   const firstRowJoined = rows[0].join(' ').toLowerCase();
   const hasHeader =
     firstRowJoined.includes('calle') ||
@@ -28,7 +27,6 @@ function parseInputRows(rawText) {
 
   return dataRows
     .map((cols) => {
-      // Formato esperado: Territorio/Subterritorio | Calle | Altura | Departamentos (ej: 1A, 1B, 2A)
       if (cols.length >= 4) {
         return {
           subterritory: cols[0],
@@ -37,7 +35,6 @@ function parseInputRows(rawText) {
           apartments: cols.slice(3).join(', ')
         };
       }
-      // Formato alternativo: Calle | Altura | Departamentos
       return {
         subterritory: '',
         street: cols[0] || '',
@@ -48,8 +45,10 @@ function parseInputRows(rawText) {
     .filter((r) => r.street && r.street_number);
 }
 
-async function geocodeAddress(street, number, city, country) {
-  const query = encodeURIComponent(`${street} ${number}, ${city}, ${country}`);
+export async function geocodeAddress(street, number, city, country) {
+  const resolvedCity = city || state.settings?.city || 'Mar del Plata';
+  const resolvedCountry = country || state.settings?.country || 'Argentina';
+  const query = encodeURIComponent(`${street} ${number}, ${resolvedCity}, ${resolvedCountry}`);
   const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${query}`;
   try {
     const res = await fetch(url, {
@@ -175,7 +174,6 @@ export function bindImportadorEvents(onComplete) {
     const bar = document.getElementById('imp-progress-bar');
     box.classList.remove('hidden');
 
-    // Mapa local de subterritorios existentes
     const subMap = new Map(
       state.subterritories.map((s) => [s.code.toLowerCase(), s.id])
     );
@@ -190,7 +188,6 @@ export function bindImportadorEvents(onComplete) {
       counterText.textContent = `${i + 1} / ${items.length}`;
       bar.style.width = `${Math.round(((i + 1) / items.length) * 100)}%`;
 
-      // 1. Crear o reutilizar subterritorio si viene informado
       let subId = null;
       if (row.subterritory) {
         const key = row.subterritory.toLowerCase();
@@ -213,10 +210,8 @@ export function bindImportadorEvents(onComplete) {
         }
       }
 
-      // 2. Geocodificar dirección (respetando límite 1 req/seg de Nominatim)
       const coords = await geocodeAddress(row.street, row.street_number, city, country);
 
-      // 3. Insertar edificio
       const { data: newBldg, error: bErr } = await supabase
         .from('terr_buildings')
         .insert({
@@ -231,7 +226,6 @@ export function bindImportadorEvents(onComplete) {
         .select()
         .single();
 
-      // 4. Insertar departamentos
       if (!bErr && newBldg && row.apartments) {
         const aptLabels = row.apartments
           .split(',')
@@ -251,7 +245,6 @@ export function bindImportadorEvents(onComplete) {
         importedCount++;
       }
 
-      // Pausa de 1.1 segundos entre filas para respetar política de OpenStreetMap
       if (i < items.length - 1 && !stopRequested) {
         await new Promise((r) => setTimeout(r, 1100));
       }
