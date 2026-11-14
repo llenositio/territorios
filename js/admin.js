@@ -287,7 +287,7 @@ function bindGeneralAdminEvents(container, onDataChanged, superMode) {
 }
 
 // ============================================================================
-// SUBPESTAÑA 2: MAPEADOR DE TERRITORIOS, SUBTERRITORIOS Y MANZANAS POR CALLES
+// SUBPESTAÑA 2: MAPEADOR POR CALLES PERIMETRALES
 // ============================================================================
 function renderPolygonMapperHtml() {
   const city = state.settings?.city || 'Mar del Plata';
@@ -308,16 +308,18 @@ function renderPolygonMapperHtml() {
             <label class="block text-xs font-bold text-slate-700 mb-1">¿Qué querés mapear?</label>
             <select id="poly-entity-type"
               class="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-xs font-bold bg-white">
-              <option value="territory">Territorio (de ${escapeHtml(state.congregation?.nombre || '')})</option>
-              <option value="subterritory" selected>Subterritorio ("Territorio XX" de ${escapeHtml(
+              <option value="territory">Territorio asignado a la congregación (${escapeHtml(
                 state.congregation?.nombre || ''
               )})</option>
-              <option value="block">Manzana ("Manzana X" dentro de un Territorio)</option>
+              <option value="subterritory" selected>Territorios (numerados, ej: 26)</option>
+              <option value="block">Manzana (con letra, ej: A, B, E)</option>
             </select>
           </div>
 
           <div id="poly-parent-territory-box" class="hidden">
-            <label class="block text-xs font-bold text-slate-700 mb-1">Territorio padre (opcional)</label>
+            <label class="block text-xs font-bold text-slate-700 mb-1">
+              Territorio asignado a la congregación (opcional)
+            </label>
             <select id="poly-parent-territory"
               class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white">
               <option value="">-- Ninguno / Independiente --</option>
@@ -341,9 +343,9 @@ function renderPolygonMapperHtml() {
           <div class="grid grid-cols-2 gap-2">
             <div>
               <label id="poly-name-label" class="block text-xs font-bold text-slate-700 mb-1">
-                Código / Número (ej: 4A)
+                Número de Territorio (ej: 26)
               </label>
-              <input type="text" id="poly-entity-name" placeholder="Ej: 4A"
+              <input type="text" id="poly-entity-name" placeholder="Ej: 26"
                 class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs font-bold" />
             </div>
             <div>
@@ -373,7 +375,7 @@ function renderPolygonMapperHtml() {
         <div id="poly-preview-section" class="${polyPreviewCoords.length >= 3 ? '' : 'hidden'} space-y-2.5 pt-2">
           <div class="flex items-center justify-between text-xs">
             <span class="font-bold text-emerald-700">
-              ✅ Polígono de ${polyPreviewCoords.length} lados listo (podés arrastrar los puntos blancos para ajustar)
+              ✅ Polígono de ${polyPreviewCoords.length} lados listo (podés arrastrar los puntos para ajustar)
             </span>
           </div>
           <div id="admin-poly-map" class="w-full h-64 rounded-xl border border-slate-300 z-10"></div>
@@ -386,12 +388,12 @@ function renderPolygonMapperHtml() {
 
       <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-2">
         <h4 class="text-xs font-extrabold uppercase text-slate-500">
-          Territorios y Manzanas cargados
+          Cargado en la Congregación
         </h4>
         <div class="text-xs text-slate-600 space-y-1">
-          <div>• <b>Territorios generales:</b> ${state.territories.length}</div>
-          <div>• <b>Subterritorios ("Territorio XX"):</b> ${state.subterritories.length}</div>
-          <div>• <b>Manzanas mapeadas:</b> ${state.blocks.length} (${state.blockFaces.length} cuadras)</div>
+          <div>• <b>Territorio asignado a la congregación:</b> ${state.territories.length}</div>
+          <div>• <b>Territorios:</b> ${state.subterritories.length}</div>
+          <div>• <b>Manzanas:</b> ${state.blocks.length} (${state.blockFaces.length} cuadras)</div>
         </div>
       </div>
     </div>
@@ -504,14 +506,14 @@ function bindPolygonMapperEvents(container, onDataChanged) {
     parentSubBox.classList.toggle('hidden', val !== 'block');
 
     if (val === 'territory') {
-      nameLabel.textContent = 'Nombre o número de Territorio';
-      nameInput.placeholder = 'Ej: Zona Centro / Territorio 4';
+      nameLabel.textContent = 'Nombre del Territorio de la congregación';
+      nameInput.placeholder = 'Ej: Centro';
     } else if (val === 'subterritory') {
-      nameLabel.textContent = 'Código de Territorio (ej: 4A)';
-      nameInput.placeholder = 'Ej: 4A';
+      nameLabel.textContent = 'Número de Territorio (ej: 26)';
+      nameInput.placeholder = 'Ej: 26';
     } else {
-      nameLabel.textContent = 'Nombre o número de Manzana';
-      nameInput.placeholder = 'Ej: 12';
+      nameLabel.textContent = 'Letra de Manzana (ej: A, B, E)';
+      nameInput.placeholder = 'Ej: E';
     }
   };
 
@@ -569,7 +571,7 @@ function bindPolygonMapperEvents(container, onDataChanged) {
     const entityName = nameInput.value.trim();
 
     if (!entityName) {
-      showToast('Ingresá el nombre o número antes de guardar', 'error');
+      showToast('Ingresá el nombre, número o letra antes de guardar', 'error');
       return;
     }
     if (polyPreviewCoords.length < 3) {
@@ -588,12 +590,12 @@ function bindPolygonMapperEvents(container, onDataChanged) {
         polygon_coords: polyPreviewCoords
       });
       if (error) {
-        showToast('Error al guardar territorio: ' + error.message, 'error');
+        showToast('Error al guardar: ' + error.message, 'error');
         saveBtn.disabled = false;
         saveBtn.textContent = '💾 Guardar en la Congregación';
         return;
       }
-      showToast(`Territorio "${entityName}" guardado`, 'success');
+      showToast(`Territorio asignado "${entityName}" guardado`, 'success');
     } else if (entityType === 'subterritory') {
       const parentTerrId = document.getElementById('poly-parent-territory').value || null;
       const { error } = await supabase.from('terr_subterritories').insert({
@@ -608,7 +610,7 @@ function bindPolygonMapperEvents(container, onDataChanged) {
         saveBtn.textContent = '💾 Guardar en la Congregación';
         return;
       }
-      showToast(`Territorio "${entityName}" guardado en la congregación`, 'success');
+      showToast(`Territorio ${entityName} guardado`, 'success');
     } else if (entityType === 'block') {
       const subId = document.getElementById('poly-parent-subterritory').value;
       if (!subId) {
@@ -629,7 +631,7 @@ function bindPolygonMapperEvents(container, onDataChanged) {
         .insert({
           congregation_id: state.congregation.id,
           subterritory_id: subId,
-          name: entityName,
+          name: entityName.toUpperCase(),
           center_lat: avgLat,
           center_lng: avgLng,
           polygon_coords: polyPreviewCoords
@@ -657,7 +659,7 @@ function bindPolygonMapperEvents(container, onDataChanged) {
       });
 
       await supabase.from('terr_block_faces').insert(facesPayload);
-      showToast(`Manzana "${entityName}" guardada con ${facesPayload.length} caras`, 'success');
+      showToast(`Manzana ${entityName.toUpperCase()} guardada con ${facesPayload.length} caras`, 'success');
     }
 
     polyPreviewCoords = [];
