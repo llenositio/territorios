@@ -360,7 +360,7 @@ function renderPolygonMapperHtml() {
               Calles del perímetro en orden (separadas por coma o una por línea)
             </label>
             <textarea id="poly-streets-input" rows="4"
-              placeholder="Ej: 3 de Febrero, Santa Fe, Av Colón, Córdoba, Alvarado, Av Independencia, Av Colón, 20 de Septiembre, Av Pedro Luro, Av Independencia"
+              placeholder="Ej: 3 de Febrero, Santa Fe, Av Colón, Córdoba, Alvarado, 20 de Septiembre, Av Pedro Luro, Av Independencia"
               class="w-full p-3 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-800 outline-none">${escapeHtml(
                 polyStreetNames.join(', ')
               )}</textarea>
@@ -374,7 +374,7 @@ function renderPolygonMapperHtml() {
 
         <div id="poly-preview-section" class="${polyPreviewCoords.length >= 3 ? '' : 'hidden'} space-y-2.5 pt-2">
           <div class="flex items-center justify-between text-xs">
-            <span class="font-bold text-emerald-700">
+            <span id="poly-preview-status" class="font-bold text-emerald-700">
               ✅ Polígono de ${polyPreviewCoords.length} lados listo (podés arrastrar los puntos para ajustar)
             </span>
           </div>
@@ -422,6 +422,23 @@ function normalizeStreetRegex(name) {
   return clean;
 }
 
+// Deduplica esquinas de avenidas doble mano (si están a menos de 45m, promedia el punto)
+function deduplicateCorners(rawNodes) {
+  const unique = [];
+  for (const pt of rawNodes) {
+    const nearIdx = unique.findIndex(
+      (u) => Math.hypot(u[0] - pt[0], u[1] - pt[1]) < 0.00045
+    );
+    if (nearIdx === -1) {
+      unique.push([...pt]);
+    } else {
+      unique[nearIdx][0] = (unique[nearIdx][0] + pt[0]) / 2;
+      unique[nearIdx][1] = (unique[nearIdx][1] + pt[1]) / 2;
+    }
+  }
+  return unique;
+}
+
 // UNA sola consulta unificada a Overpass para todo el perímetro (evita bloqueo 429)
 async function findAllPerimeterIntersections(streets, city) {
   const country = state.settings?.country || 'Argentina';
@@ -455,7 +472,7 @@ async function findAllPerimeterIntersections(streets, city) {
       const s2 = streets[(i + 1) % streets.length];
       const idx1 = uniqueStreets.indexOf(s1);
       const idx2 = uniqueStreets.indexOf(s2);
-      return `node(w.s${idx1})(w.s${idx2})->.c${i};\n    .c${i} out body 1;`;
+      return `node(w.s${idx1})(w.s${idx2})->.c${i};\n    .c${i} out body;`;
     })
     .join('\n    ');
 
@@ -471,10 +488,13 @@ async function findAllPerimeterIntersections(streets, city) {
       body: 'data=' + encodeURIComponent(singleBatchQuery)
     });
     const data = await res.json();
-    const nodes = (data.elements || []).filter((el) => el.type === 'node');
+    const nodes = (data.elements || [])
+      .filter((el) => el.type === 'node')
+      .map((n) => [n.lat, n.lon]);
 
-    if (nodes.length >= 3) {
-      return nodes.map((n) => [n.lat, n.lon]);
+    const cleanCorners = deduplicateCorners(nodes);
+    if (cleanCorners.length >= 3) {
+      return cleanCorners;
     }
   } catch (e) {
     console.warn('Error en consulta Overpass unificada:', e);
@@ -509,10 +529,12 @@ function initAdminPolyPreviewMap() {
     const nextStreet = polyStreetNames[(idx + 1) % polyStreetNames.length] || '';
     const marker = window.L.marker(pt, {
       draggable: true,
-      title: `Esquina: ${polyStreetNames[idx]} y ${nextStreet}`
+      title: `Esquina: ${polyStreetNames[idx] || ''} y ${nextStreet}`
     }).addTo(polyPreviewMap);
 
-    marker.bindPopup(`<b>Esquina ${idx + 1}</b><br>${escapeHtml(polyStreetNames[idx])} y ${escapeHtml(nextStreet)}`);
+    marker.bindPopup(
+      `<b>Esquina ${idx + 1}</b><br>${escapeHtml(polyStreetNames[idx] || '')} y ${escapeHtml(nextStreet)}`
+    );
 
     marker.on('dragend', (ev) => {
       const pos = ev.target.getLatLng();
@@ -581,6 +603,8 @@ function bindPolygonMapperEvents(container, onDataChanged) {
 
     polyStreetNames = streets;
     polyPreviewCoords = coords;
+    document.getElementById('poly-preview-status').textContent =
+      `✅ Polígono de ${coords.length} lados listo (podés arrastrar los puntos para ajustar)`;
     document.getElementById('poly-preview-section').classList.remove('hidden');
     initAdminPolyPreviewMap();
     showToast(`Polígono calculado con ${coords.length} vértices`, 'success');
