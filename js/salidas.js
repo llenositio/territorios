@@ -332,11 +332,11 @@ export function renderSalidasView(container) {
       const text = [
         `${saludo}te paso los datos de la salida al servicio que tenés asignada:`,
         ``,
-        `\u{1F4C5} *Día:* ${formatDateSpanish(item.date)}`,
-        `\u23F0 *Hora:* ${formatTimeShort(item.time)} hs`,
-        `\u{1F4CD} *Lugar:* ${item.meeting_point_text}`,
-        item.groups_assigned ? `\u{1F465} *Grupos:* ${item.groups_assigned}` : null,
-        item.assigned_subterritories ? `\u{1F5FA}\uFE0F *Territorios:* ${item.assigned_subterritories}` : null,
+        `• *Día:* ${formatDateSpanish(item.date)}`,
+        `• *Hora:* ${formatTimeShort(item.time)} hs`,
+        `• *Lugar:* ${item.meeting_point_text}`,
+        item.groups_assigned ? `• *Grupos:* ${item.groups_assigned}` : null,
+        item.assigned_subterritories ? `• *Territorios:* ${item.assigned_subterritories}` : null,
         ``,
         `Por favor, mandame un OK como respuesta`
       ]
