@@ -17,6 +17,7 @@ let adminSubTab = 'general';
 let polyPreviewCoords = [];
 let polyStreetNames = [];
 let polyPreviewMap = null;
+let manualClickMode = false;
 
 export async function loadAdminData() {
   if (!state.congregation?.id) return;
@@ -440,19 +441,34 @@ function renderPolygonMapperHtml() {
               )}</textarea>
           </div>
 
-          <button type="button" id="btn-calc-polygon"
-            class="w-full bg-blue-900 hover:bg-blue-800 text-white font-bold py-3 rounded-xl text-xs shadow transition">
-            🔍 Calcular intersecciones y previsualizar en mapa
-          </button>
+          <div class="grid grid-cols-1 sm:grid-cols-2 gap-2">
+            <button type="button" id="btn-calc-polygon"
+              class="w-full bg-blue-900 hover:bg-blue-800 text-white font-bold py-3 px-3 rounded-xl text-xs shadow transition">
+              🔍 Calcular intersecciones
+            </button>
+            <button type="button" id="btn-manual-polygon"
+              class="w-full bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-3 px-3 rounded-xl text-xs border border-slate-300 transition">
+              📍 Marcar esquinas en el mapa
+            </button>
+          </div>
         </div>
 
-        <div id="poly-preview-section" class="${polyPreviewCoords.length >= 3 ? '' : 'hidden'} space-y-2.5 pt-2">
-          <div class="flex items-center justify-between text-xs">
+        <div id="poly-preview-section" class="${polyPreviewCoords.length >= 3 || manualClickMode ? '' : 'hidden'} space-y-2.5 pt-2">
+          <div class="flex items-center justify-between gap-2 text-xs">
             <span id="poly-preview-status" class="font-bold text-emerald-700">
-              ✅ Polígono de ${polyPreviewCoords.length} lados listo (podés arrastrar los puntos para ajustar)
+              ${
+                manualClickMode
+                  ? `👆 Tocá las esquinas en el mapa (${polyPreviewCoords.length} puntos marcados)`
+                  : `✅ Polígono de ${polyPreviewCoords.length} lados listo (podés arrastrar los puntos para ajustar)`
+              }
             </span>
+            ${
+              polyPreviewCoords.length > 0
+                ? `<button type="button" id="btn-clear-poly-points" class="text-rose-600 font-bold underline shrink-0">Limpiar</button>`
+                : ''
+            }
           </div>
-          <div id="admin-poly-map" class="w-full h-64 rounded-xl border border-slate-300 z-10"></div>
+          <div id="admin-poly-map" class="w-full h-72 rounded-xl border border-slate-300 z-10"></div>
           <button type="button" id="btn-save-polygon"
             class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold py-3 rounded-xl text-sm shadow">
             💾 Guardar en la Congregación
@@ -486,6 +502,12 @@ function normalizeStreetRegex(name) {
     .trim()
     .replace(/^av\.?\s+/i, '(Avenida|Av\\.?) ')
     .replace(/^bv\.?\s+/i, '(Boulevard|Bv\\.?) ')
+    .replace(/^diag\.?\s+/i, '(Diagonal|Diag\\.?) ')
+    .replace(/^sgo\.?\s+/i, '(Santiago|Sgo\\.?) ')
+    .replace(/^santiago\b/i, '(Santiago|Sgo\\.?)')
+    .replace(/^9\s+de\s+julio\b/i, '(9|Nueve) de Julio')
+    .replace(/^25\s+de\s+mayo\b/i, '(25|Veinticinco) de Mayo')
+    .replace(/^3\s+de\s+febrero\b/i, '(3|Tres) de Febrero')
     .replace(/"/g, '\\"');
   clean = clean
     .replace(/[aá]/gi, '[aá]')
@@ -513,7 +535,35 @@ function deduplicateCorners(rawNodes) {
   return unique;
 }
 
-// UNA sola consulta unificada a Overpass para todo el perímetro (evita bloqueo 429)
+async function queryOverpassWithFallback(query) {
+  const endpoints = [
+    'https://overpass-api.de/api/interpreter',
+    'https://overpass.kumi.systems/api/interpreter'
+  ];
+
+  for (const url of endpoints) {
+    try {
+      const controller = new AbortController();
+      const timer = setTimeout(() => controller.abort(), 14000);
+      const res = await fetch(url, {
+        method: 'POST',
+        body: 'data=' + encodeURIComponent(query),
+        signal: controller.signal
+      });
+      clearTimeout(timer);
+      if (!res.ok) continue;
+      const data = await res.json();
+      if (data && Array.isArray(data.elements)) {
+        return data;
+      }
+    } catch (e) {
+      console.warn(`Overpass fallo en ${url}:`, e);
+    }
+  }
+  return null;
+}
+
+// UNA sola consulta unificada a Overpass para todo el perímetro (con servidor de respaldo)
 async function findAllPerimeterIntersections(streets, city) {
   const country = state.settings?.country || 'Argentina';
 
@@ -537,7 +587,7 @@ async function findAllPerimeterIntersections(streets, city) {
   const wayDefs = uniqueStreets
     .map((st, idx) => {
       const rx = normalizeStreetRegex(st);
-      return `way(around:18000,${centerLat},${centerLon})["highway"]["name"~"${rx}",i]->.s${idx};`;
+      return `way(around:20000,${centerLat},${centerLon})["highway"]["name"~"${rx}",i]->.s${idx};`;
     })
     .join('\n    ');
 
@@ -556,22 +606,16 @@ async function findAllPerimeterIntersections(streets, city) {
     ${cornerDefs}
   `;
 
-  try {
-    const res = await fetch('https://overpass-api.de/api/interpreter', {
-      method: 'POST',
-      body: 'data=' + encodeURIComponent(singleBatchQuery)
-    });
-    const data = await res.json();
-    const nodes = (data.elements || [])
-      .filter((el) => el.type === 'node')
-      .map((n) => [n.lat, n.lon]);
+  const data = await queryOverpassWithFallback(singleBatchQuery);
+  if (!data) return [];
 
-    const cleanCorners = deduplicateCorners(nodes);
-    if (cleanCorners.length >= 3) {
-      return cleanCorners;
-    }
-  } catch (e) {
-    console.warn('Error en consulta Overpass unificada:', e);
+  const nodes = (data.elements || [])
+    .filter((el) => el.type === 'node')
+    .map((n) => [n.lat, n.lon]);
+
+  const cleanCorners = deduplicateCorners(nodes);
+  if (cleanCorners.length >= 3) {
+    return cleanCorners;
   }
 
   return [];
@@ -579,25 +623,57 @@ async function findAllPerimeterIntersections(streets, city) {
 
 function initAdminPolyPreviewMap() {
   const mapEl = document.getElementById('admin-poly-map');
-  if (!mapEl || typeof window.L === 'undefined' || polyPreviewCoords.length < 3) return;
+  if (!mapEl || typeof window.L === 'undefined') return;
+
+  const prevCenter = polyPreviewMap ? polyPreviewMap.getCenter() : null;
+  const prevZoom = polyPreviewMap ? polyPreviewMap.getZoom() : null;
 
   if (polyPreviewMap) {
     polyPreviewMap.remove();
     polyPreviewMap = null;
   }
 
-  polyPreviewMap = window.L.map('admin-poly-map').setView(polyPreviewCoords[0], 15);
+  // Si hay un territorio padre elegido, centrar allí como guía visual
+  const parentSubId = document.getElementById('poly-parent-subterritory')?.value;
+  const parentSub = state.subterritories.find((s) => s.id === parentSubId);
+  const initialPt =
+    prevCenter
+      ? [prevCenter.lat, prevCenter.lng]
+      : polyPreviewCoords[0] ||
+        (Array.isArray(parentSub?.polygon_coords) && parentSub.polygon_coords[0]) ||
+        [-38.0005, -57.5475];
+
+  polyPreviewMap = window.L.map('admin-poly-map').setView(initialPt, prevZoom || 16);
   window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '© OpenStreetMap'
   }).addTo(polyPreviewMap);
 
-  const polygonLayer = window.L.polygon(polyPreviewCoords, {
-    color: '#1e3a8a',
-    fillColor: '#3b82f6',
-    fillOpacity: 0.25,
-    weight: 4
-  }).addTo(polyPreviewMap);
+  // Dibujar el contorno del territorio padre como referencia si existe
+  if (Array.isArray(parentSub?.polygon_coords) && parentSub.polygon_coords.length >= 3) {
+    window.L.polygon(parentSub.polygon_coords, {
+      color: '#64748b',
+      weight: 2,
+      dashArray: '5, 5',
+      fillOpacity: 0.04,
+      interactive: false
+    }).addTo(polyPreviewMap);
+  }
+
+  let polygonLayer = null;
+  if (polyPreviewCoords.length >= 3) {
+    polygonLayer = window.L.polygon(polyPreviewCoords, {
+      color: '#1e3a8a',
+      fillColor: '#3b82f6',
+      fillOpacity: 0.25,
+      weight: 4
+    }).addTo(polyPreviewMap);
+  } else if (polyPreviewCoords.length === 2) {
+    polygonLayer = window.L.polyline(polyPreviewCoords, {
+      color: '#1e3a8a',
+      weight: 4
+    }).addTo(polyPreviewMap);
+  }
 
   polyPreviewCoords.forEach((pt, idx) => {
     const nextStreet = polyStreetNames[(idx + 1) % polyStreetNames.length] || '';
@@ -607,17 +683,45 @@ function initAdminPolyPreviewMap() {
     }).addTo(polyPreviewMap);
 
     marker.bindPopup(
-      `<b>Esquina ${idx + 1}</b><br>${escapeHtml(polyStreetNames[idx] || '')} y ${escapeHtml(nextStreet)}`
+      `<b>Esquina ${idx + 1}</b>${
+        polyStreetNames[idx]
+          ? `<br>${escapeHtml(polyStreetNames[idx])} y ${escapeHtml(nextStreet)}`
+          : ''
+      }`
     );
 
     marker.on('dragend', (ev) => {
       const pos = ev.target.getLatLng();
       polyPreviewCoords[idx] = [pos.lat, pos.lng];
-      polygonLayer.setLatLngs(polyPreviewCoords);
+      if (polygonLayer) {
+        polygonLayer.setLatLngs(polyPreviewCoords);
+      }
     });
   });
 
-  polyPreviewMap.fitBounds(polygonLayer.getBounds(), { padding: [25, 25] });
+  // Permitir agregar esquinas haciendo clic en el mapa en modo manual
+  polyPreviewMap.on('click', (ev) => {
+    if (!manualClickMode) return;
+    polyPreviewCoords.push([ev.latlng.lat, ev.latlng.lng]);
+    const statusEl = document.getElementById('poly-preview-status');
+    if (statusEl) {
+      statusEl.textContent =
+        polyPreviewCoords.length >= 3
+          ? `✅ ${polyPreviewCoords.length} esquinas marcadas (podés arrastrarlas o seguir tocando)`
+          : `👆 Tocá las esquinas en el mapa (${polyPreviewCoords.length} puntos marcados)`;
+    }
+    initAdminPolyPreviewMap();
+  });
+
+  if (!prevCenter && polygonLayer && polyPreviewCoords.length >= 3) {
+    polyPreviewMap.fitBounds(polygonLayer.getBounds(), { padding: [25, 25] });
+  } else if (
+    !prevCenter &&
+    Array.isArray(parentSub?.polygon_coords) &&
+    parentSub.polygon_coords.length >= 3
+  ) {
+    polyPreviewMap.fitBounds(parentSub.polygon_coords, { padding: [20, 20] });
+  }
 }
 
 function bindPolygonMapperEvents(container, onDataChanged) {
@@ -676,6 +780,10 @@ function bindPolygonMapperEvents(container, onDataChanged) {
       return;
     }
 
+    if (!confirm(`¿Seguro que querés reiniciar ${label} (${faceIdsToReset.length} caras)?`)) {
+      return;
+    }
+
     const { error } = await supabase
       .from('terr_block_faces')
       .update({
@@ -728,8 +836,27 @@ function bindPolygonMapperEvents(container, onDataChanged) {
   typeSelect.onchange = syncTypeFields;
   syncTypeFields();
 
-  if (polyPreviewCoords.length >= 3) {
+  if (polyPreviewCoords.length >= 3 || manualClickMode) {
     setTimeout(initAdminPolyPreviewMap, 50);
+  }
+
+  document.getElementById('btn-manual-polygon').onclick = () => {
+    const rawStreets = document.getElementById('poly-streets-input').value;
+    polyStreetNames = parsePerimeterStreets(rawStreets);
+    manualClickMode = true;
+    polyPreviewCoords = [];
+    document.getElementById('poly-preview-section').classList.remove('hidden');
+    document.getElementById('poly-preview-status').textContent =
+      '👆 Tocá en orden las esquinas en el mapa';
+    initAdminPolyPreviewMap();
+  };
+
+  const clearBtn = document.getElementById('btn-clear-poly-points');
+  if (clearBtn) {
+    clearBtn.onclick = () => {
+      polyPreviewCoords = [];
+      initAdminPolyPreviewMap();
+    };
   }
 
   document.getElementById('btn-calc-polygon').onclick = async () => {
@@ -744,18 +871,22 @@ function bindPolygonMapperEvents(container, onDataChanged) {
 
     const btn = document.getElementById('btn-calc-polygon');
     btn.disabled = true;
-    btn.textContent = `Buscando ${streets.length} esquinas en 1 consulta...`;
+    btn.textContent = `Buscando ${streets.length} esquinas...`;
 
     const coords = await findAllPerimeterIntersections(streets, city);
 
     btn.disabled = false;
-    btn.textContent = '🔍 Calcular intersecciones y previsualizar en mapa';
+    btn.textContent = '🔍 Calcular intersecciones';
 
     if (coords.length < 3) {
-      showToast('No se pudieron detectar las esquinas automáticamente. Revisá los nombres de calles.', 'error');
+      showToast(
+        'No se hallaron automáticamente. Tocá "📍 Marcar esquinas en el mapa" para marcarlas con un clic.',
+        'error'
+      );
       return;
     }
 
+    manualClickMode = false;
     polyStreetNames = streets;
     polyPreviewCoords = coords;
     document.getElementById('poly-preview-status').textContent =
@@ -774,8 +905,14 @@ function bindPolygonMapperEvents(container, onDataChanged) {
       return;
     }
     if (polyPreviewCoords.length < 3) {
-      showToast('Primero calculá el polígono en el mapa', 'error');
+      showToast('Primero marcá o calculá al menos 3 esquinas en el mapa', 'error');
       return;
+    }
+
+    const rawStreets = document.getElementById('poly-streets-input').value;
+    const parsedStreets = parsePerimeterStreets(rawStreets);
+    if (parsedStreets.length > 0) {
+      polyStreetNames = parsedStreets;
     }
 
     const saveBtn = document.getElementById('btn-save-polygon');
@@ -859,6 +996,7 @@ function bindPolygonMapperEvents(container, onDataChanged) {
       showToast(`Manzana ${entityName.toUpperCase()} guardada con ${facesPayload.length} caras`, 'success');
     }
 
+    manualClickMode = false;
     polyPreviewCoords = [];
     polyStreetNames = [];
     if (onDataChanged) await onDataChanged();
