@@ -18,6 +18,11 @@ let savedMapCenter = null;
 let savedMapZoom = null;
 let shouldFitBoundsNextRender = true;
 
+// Control de sincronización en vivo entre celular y compu
+let realtimeChannel = null;
+let activeManzanasContainer = null;
+let visibilityListenerAttached = false;
+
 function canMarkTerritory() {
   const role = state.profile?.role;
   return isSuperadmin() || role === 'admin' || role === 'conductor';
@@ -65,6 +70,57 @@ export async function loadBlocksAndFaces() {
   if (!dnvRes.error) state.dnvHouses = dnvRes.data || [];
 }
 
+function setupLiveSync(container) {
+  activeManzanasContainer = container;
+  const congId = state.congregation?.id;
+  if (!congId) return;
+
+  // 1. Suscripción en tiempo real a cambios en caras de manzana (celu <-> compu)
+  if (!realtimeChannel) {
+    realtimeChannel = supabase
+      .channel(`faces-live-${congId}`)
+      .on(
+        'postgres_changes',
+        {
+          event: 'UPDATE',
+          schema: 'public',
+          table: 'terr_block_faces',
+          filter: `congregation_id=eq.${congId}`
+        },
+        (payload) => {
+          const updated = payload.new;
+          if (!updated) return;
+          const idx = state.blockFaces.findIndex((f) => f.id === updated.id);
+          if (idx !== -1) {
+            state.blockFaces[idx] = { ...state.blockFaces[idx], ...updated };
+            if (
+              activeManzanasContainer &&
+              document.getElementById('terr-leaflet-map')
+            ) {
+              renderManzanasView(activeManzanasContainer, { skipFetch: true });
+            }
+          }
+        }
+      )
+      .subscribe();
+  }
+
+  // 2. Refrescar al desbloquear el celular o volver a la pestaña del navegador
+  if (!visibilityListenerAttached) {
+    visibilityListenerAttached = true;
+    document.addEventListener('visibilitychange', async () => {
+      if (
+        document.visibilityState === 'visible' &&
+        activeManzanasContainer &&
+        document.getElementById('terr-leaflet-map')
+      ) {
+        await loadBlocksAndFaces();
+        renderManzanasView(activeManzanasContainer, { skipFetch: true });
+      }
+    });
+  }
+}
+
 function getFaceAgeColor(lastCompletedAt) {
   const days = daysAgo(lastCompletedAt);
   if (days === null || days > 90) {
@@ -76,13 +132,16 @@ function getFaceAgeColor(lastCompletedAt) {
   return { hex: '#10b981', badge: 'bg-emerald-100 text-emerald-800', label: 'Reciente' };
 }
 
-// Desplaza cada cara ~6m hacia el interior de su manzana para que en calles compartidas se vean las 2 veredas paralelas
 function getInsetFaceCoords(lineCoords, block) {
   if (!Array.isArray(lineCoords) || lineCoords.length < 2 || !block) return lineCoords;
 
   let centerLat = block.center_lat;
   let centerLng = block.center_lng;
-  if ((!centerLat || !centerLng) && Array.isArray(block.polygon_coords) && block.polygon_coords.length >= 3) {
+  if (
+    (!centerLat || !centerLng) &&
+    Array.isArray(block.polygon_coords) &&
+    block.polygon_coords.length >= 3
+  ) {
     centerLat = block.polygon_coords.reduce((s, p) => s + p[0], 0) / block.polygon_coords.length;
     centerLng = block.polygon_coords.reduce((s, p) => s + p[1], 0) / block.polygon_coords.length;
   }
@@ -101,7 +160,6 @@ function getInsetFaceCoords(lineCoords, block) {
   const dLat = toCenterLat * offsetScale;
   const dLng = toCenterLng * offsetScale;
 
-  // Recortar 10% en cada extremo para dejar libre la esquina y facilitar el toque en cada vereda
   const trim = 0.1;
   const q1 = [
     p1[0] + (p2[0] - p1[0]) * trim + dLat,
@@ -115,11 +173,22 @@ function getInsetFaceCoords(lineCoords, block) {
   return [q1, q2];
 }
 
-export function renderManzanasView(container) {
+export function renderManzanasView(container, options = {}) {
+  setupLiveSync(container);
+
+  // Si venimos de otra pestaña, traer datos frescos de Supabase en segundo plano
+  if (!options.skipFetch) {
+    loadBlocksAndFaces().then(() => {
+      if (document.getElementById('terr-leaflet-map')) {
+        renderManzanasView(container, { skipFetch: true });
+      }
+    });
+  }
+
   if (!state.userLocation) {
     requestOnDemandGps({
       silent: true,
-      onSuccess: () => renderManzanasView(container)
+      onSuccess: () => renderManzanasView(container, { skipFetch: true })
     });
   }
 
@@ -253,12 +322,12 @@ export function renderManzanasView(container) {
   document.getElementById('filter-subterritory').onchange = (e) => {
     selectedSubterritoryId = e.target.value;
     shouldFitBoundsNextRender = true;
-    renderManzanasView(container);
+    renderManzanasView(container, { skipFetch: true });
   };
 
   document.getElementById('btn-add-dnv').onclick = () => {
     showDnvModal = true;
-    renderManzanasView(container);
+    renderManzanasView(container, { skipFetch: true });
   };
 
   if (editable) {
@@ -309,7 +378,6 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
 
   const bounds = [];
 
-  // 1. Polígonos de territorio general (solo en vista general)
   if (selectedSubterritoryId === 'ALL') {
     state.territories.forEach((t) => {
       if (Array.isArray(t.polygon_coords) && t.polygon_coords.length >= 3) {
@@ -325,7 +393,6 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
     });
   }
 
-  // 2. Polígonos de Territorios ("Territorio XX")
   subterritories.forEach((sub) => {
     if (Array.isArray(sub.polygon_coords) && sub.polygon_coords.length >= 3) {
       window.L.polygon(sub.polygon_coords, {
@@ -339,7 +406,6 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
     }
   });
 
-  // 3. Polígonos de Manzanas (toque en el centro marca/desmarca toda la manzana)
   blocks.forEach((b) => {
     const blockFaces = state.blockFaces.filter((f) => f.block_id === b.id);
     const allDoneToday =
@@ -404,14 +470,12 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
     }
   });
 
-  // 4. Caras de manzana con área táctil ancha invisible para celular
   faces.forEach((face) => {
     const colorInfo = getFaceAgeColor(face.last_completed_at);
     const parentBlock = state.blocks.find((b) => b.id === face.block_id);
     if (Array.isArray(face.line_coords) && face.line_coords.length >= 2) {
       const insetCoords = getInsetFaceCoords(face.line_coords, parentBlock);
 
-      // Línea visual de color
       window.L.polyline(insetCoords, {
         color: colorInfo.hex,
         weight: 6,
@@ -419,7 +483,6 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
         interactive: false
       }).addTo(leafletMap);
 
-      // Zona táctil ancha (22px) para que el dedo en el celular la detecte siempre
       const hitArea = window.L.polyline(insetCoords, {
         color: '#000000',
         weight: 22,
@@ -444,7 +507,6 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
     }
   });
 
-  // 5. Casas No Visitar
   state.dnvHouses.forEach((h) => {
     if (h.lat && h.lng) {
       const dnvMarker = window.L.circleMarker([h.lat, h.lng], {
@@ -462,7 +524,6 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
     }
   });
 
-  // 6. Ubicación actual del publicador
   if (state.userLocation) {
     window.L.circleMarker([state.userLocation.lat, state.userLocation.lng], {
       radius: 7,
@@ -507,7 +568,7 @@ async function toggleFaceCompleted(faceId, container) {
     state.blockFaces[idx].last_completed_at = null;
     state.blockFaces[idx].last_completed_by = null;
     showToast(`↩ Desmarcada: ${face.street_name}`, 'info');
-    renderManzanasView(container);
+    renderManzanasView(container, { skipFetch: true });
     return;
   }
 
@@ -534,7 +595,7 @@ async function toggleFaceCompleted(faceId, container) {
 
   state.blockFaces[idx].last_completed_at = nowIso;
   showToast(`✓ Marcada hecha hoy: ${face.street_name}`, 'success');
-  renderManzanasView(container);
+  renderManzanasView(container, { skipFetch: true });
 }
 
 async function toggleWholeBlock(blockId, container) {
@@ -567,7 +628,7 @@ async function toggleWholeBlock(blockId, container) {
     });
 
     showToast(`↩ Manzana ${block.name} desmarcada por completo`, 'info');
-    renderManzanasView(container);
+    renderManzanasView(container, { skipFetch: true });
     return;
   }
 
@@ -604,7 +665,7 @@ async function toggleWholeBlock(blockId, container) {
   });
 
   showToast(`✓ Manzana ${block.name} completa marcada hoy`, 'success');
-  renderManzanasView(container);
+  renderManzanasView(container, { skipFetch: true });
 }
 
 export function checkDnvProximityAlert(lat, lng) {
@@ -659,7 +720,7 @@ function renderDnvModalHtml() {
 function bindDnvModalEvents(container) {
   document.getElementById('close-dnv-modal').onclick = () => {
     showDnvModal = false;
-    renderManzanasView(container);
+    renderManzanasView(container, { skipFetch: true });
   };
 
   document.getElementById('dnv-house-form').onsubmit = (e) => {
@@ -698,7 +759,7 @@ function bindDnvModalEvents(container) {
         state.dnvHouses.push(data);
         showDnvModal = false;
         showToast('Casa No Visitar guardada en el mapa', 'success');
-        renderManzanasView(container);
+        renderManzanasView(container, { skipFetch: true });
       },
       () => {
         showToast('Activá el GPS para marcar la casa exacta', 'error');
