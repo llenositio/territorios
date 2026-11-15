@@ -97,13 +97,12 @@ function getInsetFaceCoords(lineCoords, block) {
   const dist = Math.hypot(toCenterLat, toCenterLng);
   if (dist === 0) return lineCoords;
 
-  // ~0.000065 grados ≈ 6-7 metros hacia adentro de la vereda
   const offsetScale = Math.min(0.000065 / dist, 0.18);
   const dLat = toCenterLat * offsetScale;
   const dLng = toCenterLng * offsetScale;
 
-  // También recortar un 6% en cada extremo para que no se monten en las esquinas
-  const trim = 0.06;
+  // Recortar 10% en cada extremo para dejar libre la esquina y facilitar el toque en cada vereda
+  const trim = 0.1;
   const q1 = [
     p1[0] + (p2[0] - p1[0]) * trim + dLat,
     p1[1] + (p2[1] - p1[1]) * trim + dLng
@@ -171,7 +170,7 @@ export function renderManzanasView(container) {
             : ''
         }
 
-        <div id="terr-leaflet-map" class="w-full h-72 rounded-xl border border-slate-200 z-10"></div>
+        <div id="terr-leaflet-map" class="w-full h-80 rounded-xl border border-slate-200 z-10 touch-manipulation"></div>
 
         <div class="flex items-center justify-between text-[11px] text-slate-600 px-1">
           <span class="flex items-center gap-1"><i class="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block"></i> &lt;45 días</span>
@@ -291,7 +290,11 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
   const defaultLng = savedMapCenter?.lng || state.userLocation?.lng || -57.5426;
   const defaultZoom = savedMapZoom || 16;
 
-  leafletMap = window.L.map('terr-leaflet-map').setView([defaultLat, defaultLng], defaultZoom);
+  leafletMap = window.L.map('terr-leaflet-map', {
+    tap: true,
+    tapTolerance: 18
+  }).setView([defaultLat, defaultLng], defaultZoom);
+
   window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '© OpenStreetMap'
@@ -372,9 +375,9 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
           background:${allDoneToday ? '#059669' : '#1e293b'};
           color:#fff;
           font-weight:800;
-          font-size:11px;
-          width:22px;
-          height:22px;
+          font-size:12px;
+          width:28px;
+          height:28px;
           border-radius:9999px;
           display:flex;
           align-items:center;
@@ -383,8 +386,8 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
           box-shadow:0 1px 4px rgba(0,0,0,0.35);
           cursor:pointer;
         ">${escapeHtml(b.name)}</div>`,
-        iconSize: [22, 22],
-        iconAnchor: [11, 11]
+        iconSize: [28, 28],
+        iconAnchor: [14, 14]
       });
 
       const labelMarker = window.L.marker([centerLat, centerLng], { icon: labelIcon }).addTo(
@@ -401,25 +404,36 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
     }
   });
 
-  // 4. Caras de manzana desplazadas hacia su propia vereda (se ven 2 líneas en calles compartidas)
+  // 4. Caras de manzana con área táctil ancha invisible para celular
   faces.forEach((face) => {
     const colorInfo = getFaceAgeColor(face.last_completed_at);
     const parentBlock = state.blocks.find((b) => b.id === face.block_id);
     if (Array.isArray(face.line_coords) && face.line_coords.length >= 2) {
       const insetCoords = getInsetFaceCoords(face.line_coords, parentBlock);
-      const line = window.L.polyline(insetCoords, {
+
+      // Línea visual de color
+      window.L.polyline(insetCoords, {
         color: colorInfo.hex,
-        weight: 5,
-        opacity: 0.95
+        weight: 6,
+        opacity: 0.95,
+        interactive: false
+      }).addTo(leafletMap);
+
+      // Zona táctil ancha (22px) para que el dedo en el celular la detecte siempre
+      const hitArea = window.L.polyline(insetCoords, {
+        color: '#000000',
+        weight: 22,
+        opacity: 0.01,
+        interactive: true
       }).addTo(leafletMap);
 
       if (editable) {
-        line.on('click', async (ev) => {
+        hitArea.on('click', async (ev) => {
           window.L.DomEvent.stopPropagation(ev);
           await toggleFaceCompleted(face.id, container);
         });
       } else {
-        line.bindPopup(
+        hitArea.bindPopup(
           `<b>${escapeHtml(face.street_name)} ${escapeHtml(face.number_range || '')}</b><br>${formatRelativeDate(
             face.last_completed_at
           )}`
@@ -461,7 +475,6 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
       .bindPopup('Tu ubicación actual');
   }
 
-  // Solo encuadrar automáticamente la primera vez o al cambiar filtro de territorio
   if (shouldFitBoundsNextRender && bounds.length > 0) {
     leafletMap.fitBounds(bounds, { padding: [25, 25], maxZoom: 17 });
     savedMapCenter = leafletMap.getCenter();
@@ -470,7 +483,6 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
   }
 }
 
-// Alterna una cara individual manteniendo el encuadre del mapa
 async function toggleFaceCompleted(faceId, container) {
   const idx = state.blockFaces.findIndex((f) => f.id === faceId);
   if (idx === -1) return;
@@ -525,7 +537,6 @@ async function toggleFaceCompleted(faceId, container) {
   renderManzanasView(container);
 }
 
-// Alterna toda la manzana completa manteniendo el encuadre del mapa
 async function toggleWholeBlock(blockId, container) {
   const block = state.blocks.find((b) => b.id === blockId);
   const blockFaces = state.blockFaces.filter((f) => f.block_id === blockId);
