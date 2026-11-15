@@ -12,6 +12,7 @@ import {
 let selectedSubterritoryId = 'ALL';
 let leafletMap = null;
 let showDnvModal = false;
+let isMapExpanded = false;
 
 // Guardar encuadre actual para que el mapa no salte ni haga zoom al marcar/desmarcar
 let savedMapCenter = null;
@@ -207,9 +208,13 @@ export function renderManzanasView(container, options = {}) {
   const blockIds = new Set(filteredBlocks.map((b) => b.id));
   const filteredFaces = state.blockFaces.filter((f) => blockIds.has(f.block_id));
 
+  const mapHeightClass = isMapExpanded
+    ? 'h-[82vh] min-h-[540px]'
+    : 'h-[58vh] min-h-[420px]';
+
   container.innerHTML = `
     <div class="space-y-4 pb-24">
-      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
+      <div class="bg-white p-3 sm:p-4 rounded-2xl shadow-sm border border-slate-200 space-y-2.5">
         <div class="flex gap-2">
           <select id="filter-subterritory"
             class="flex-1 px-3 py-2.5 rounded-xl border border-slate-300 text-sm font-bold bg-white">
@@ -224,8 +229,14 @@ export function renderManzanasView(container, options = {}) {
               .join('')}
           </select>
 
+          <button id="btn-toggle-map-size"
+            class="bg-slate-100 hover:bg-slate-200 active:scale-95 text-slate-800 font-bold px-3 py-2.5 rounded-xl text-xs border border-slate-300 transition shrink-0"
+            title="Agrandar o achicar el mapa">
+            ${isMapExpanded ? '⤡ Normal' : '⤢ Ampliar'}
+          </button>
+
           <button id="btn-add-dnv"
-            class="bg-rose-600 hover:bg-rose-500 active:scale-95 text-white font-bold px-3.5 py-2.5 rounded-xl text-xs shadow-sm transition"
+            class="bg-rose-600 hover:bg-rose-500 active:scale-95 text-white font-bold px-3 py-2.5 rounded-xl text-xs shadow-sm transition shrink-0"
             title="Marcar casa No Visitar">
             🚫 Casa
           </button>
@@ -239,9 +250,9 @@ export function renderManzanasView(container, options = {}) {
             : ''
         }
 
-        <div id="terr-leaflet-map" class="w-full h-80 rounded-xl border border-slate-200 z-10 touch-manipulation"></div>
+        <div id="terr-leaflet-map" class="w-full ${mapHeightClass} rounded-xl border border-slate-200 z-10 touch-manipulation transition-all"></div>
 
-        <div class="flex items-center justify-between text-[11px] text-slate-600 px-1">
+        <div class="flex flex-wrap items-center justify-between gap-2 text-[11px] text-slate-600 px-1">
           <span class="flex items-center gap-1"><i class="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block"></i> &lt;45 días</span>
           <span class="flex items-center gap-1"><i class="w-2.5 h-2.5 rounded-full bg-amber-500 inline-block"></i> 45-90 días</span>
           <span class="flex items-center gap-1"><i class="w-2.5 h-2.5 rounded-full bg-rose-600 inline-block"></i> &gt;90d / Nunca</span>
@@ -322,6 +333,11 @@ export function renderManzanasView(container, options = {}) {
   document.getElementById('filter-subterritory').onchange = (e) => {
     selectedSubterritoryId = e.target.value;
     shouldFitBoundsNextRender = true;
+    renderManzanasView(container, { skipFetch: true });
+  };
+
+  document.getElementById('btn-toggle-map-size').onclick = () => {
+    isMapExpanded = !isMapExpanded;
     renderManzanasView(container, { skipFetch: true });
   };
 
@@ -542,6 +558,10 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
     savedMapZoom = leafletMap.getZoom();
     shouldFitBoundsNextRender = false;
   }
+
+  setTimeout(() => {
+    if (leafletMap) leafletMap.invalidateSize();
+  }, 100);
 }
 
 async function toggleFaceCompleted(faceId, container) {
