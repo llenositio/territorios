@@ -454,7 +454,7 @@ function renderPolygonMapperHtml() {
         </div>
 
         <div id="poly-preview-section" class="${polyPreviewCoords.length >= 3 || manualClickMode ? '' : 'hidden'} space-y-2.5 pt-2">
-          <div class="flex items-center justify-between gap-2 text-xs">
+          <div class="flex flex-wrap items-center justify-between gap-2 text-xs">
             <span id="poly-preview-status" class="font-bold text-emerald-700">
               ${
                 manualClickMode
@@ -462,13 +462,19 @@ function renderPolygonMapperHtml() {
                   : `✅ Polígono de ${polyPreviewCoords.length} lados listo (podés arrastrar los puntos para ajustar)`
               }
             </span>
-            ${
-              polyPreviewCoords.length > 0
-                ? `<button type="button" id="btn-clear-poly-points" class="text-rose-600 font-bold underline shrink-0">Limpiar</button>`
-                : ''
-            }
+            <div class="flex items-center gap-2 shrink-0">
+              <button type="button" id="btn-toggle-poly-map-size"
+                class="bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold px-2.5 py-1 rounded-lg text-[11px]">
+                ⤢ Agrandar / Achicar mapa
+              </button>
+              ${
+                polyPreviewCoords.length > 0
+                  ? `<button type="button" id="btn-clear-poly-points" class="text-rose-600 font-bold underline">Limpiar</button>`
+                  : ''
+              }
+            </div>
           </div>
-          <div id="admin-poly-map" class="w-full h-72 rounded-xl border border-slate-300 z-10"></div>
+          <div id="admin-poly-map" class="w-full h-[500px] rounded-xl border border-slate-300 z-10 transition-all"></div>
           <button type="button" id="btn-save-polygon"
             class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold py-3 rounded-xl text-sm shadow">
             💾 Guardar en la Congregación
@@ -722,6 +728,10 @@ function initAdminPolyPreviewMap() {
   ) {
     polyPreviewMap.fitBounds(parentSub.polygon_coords, { padding: [20, 20] });
   }
+
+  setTimeout(() => {
+    if (polyPreviewMap) polyPreviewMap.invalidateSize();
+  }, 100);
 }
 
 function bindPolygonMapperEvents(container, onDataChanged) {
@@ -838,6 +848,20 @@ function bindPolygonMapperEvents(container, onDataChanged) {
 
   if (polyPreviewCoords.length >= 3 || manualClickMode) {
     setTimeout(initAdminPolyPreviewMap, 50);
+  }
+
+  const toggleSizeBtn = document.getElementById('btn-toggle-poly-map-size');
+  if (toggleSizeBtn) {
+    toggleSizeBtn.onclick = () => {
+      const mapDiv = document.getElementById('admin-poly-map');
+      if (!mapDiv) return;
+      const isExpanded = mapDiv.classList.contains('h-[80vh]');
+      mapDiv.classList.toggle('h-[80vh]', !isExpanded);
+      mapDiv.classList.toggle('h-[500px]', isExpanded);
+      if (polyPreviewMap) {
+        setTimeout(() => polyPreviewMap.invalidateSize(), 150);
+      }
+    };
   }
 
   document.getElementById('btn-manual-polygon').onclick = () => {
