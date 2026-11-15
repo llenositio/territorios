@@ -1,5 +1,5 @@
 import { supabase } from './supabase.js';
-import { state } from './state.js';
+import { state, isSuperadmin } from './state.js';
 import { requestOnDemandGps } from './app.js';
 import {
   showToast,
@@ -12,6 +12,16 @@ import {
 let selectedSubterritoryId = 'ALL';
 let leafletMap = null;
 let showDnvModal = false;
+
+function canMarkTerritory() {
+  const role = state.profile?.role;
+  return isSuperadmin() || role === 'admin' || role === 'conductor';
+}
+
+function isCompletedToday(lastCompletedAt) {
+  const d = daysAgo(lastCompletedAt);
+  return d !== null && d === 0;
+}
 
 export async function loadBlocksAndFaces() {
   if (!state.congregation?.id) return;
@@ -62,13 +72,14 @@ function getFaceAgeColor(lastCompletedAt) {
 }
 
 export function renderManzanasView(container) {
-  // Encender GPS bajo demanda al entrar a Manzanas para alertas de proximidad y mapa en vivo
   if (!state.userLocation) {
     requestOnDemandGps({
       silent: true,
       onSuccess: () => renderManzanasView(container)
     });
   }
+
+  const editable = canMarkTerritory();
 
   const filteredSubterritories =
     selectedSubterritoryId === 'ALL'
@@ -107,7 +118,15 @@ export function renderManzanasView(container) {
           </button>
         </div>
 
-        <div id="terr-leaflet-map" class="w-full h-64 rounded-xl border border-slate-200 z-10"></div>
+        ${
+          editable
+            ? `<div class="bg-blue-50 border border-blue-200 text-blue-950 px-3 py-2 rounded-xl text-[11px] font-semibold">
+                👆 <b>Modo Conductor:</b> Tocá una <b>cuadra</b> para marcar/desmarcar esa cara, o tocá el <b>centro de la manzana</b> para marcar/desmarcar las 4 caras juntas.
+              </div>`
+            : ''
+        }
+
+        <div id="terr-leaflet-map" class="w-full h-72 rounded-xl border border-slate-200 z-10"></div>
 
         <div class="flex items-center justify-between text-[11px] text-slate-600 px-1">
           <span class="flex items-center gap-1"><i class="w-2.5 h-2.5 rounded-full bg-emerald-500 inline-block"></i> &lt;45 días</span>
@@ -132,6 +151,7 @@ export function renderManzanasView(container) {
                   const block = state.blocks.find((b) => b.id === face.block_id);
                   const sub = state.subterritories.find((s) => s.id === block?.subterritory_id);
                   const colorInfo = getFaceAgeColor(face.last_completed_at);
+                  const doneToday = isCompletedToday(face.last_completed_at);
 
                   return `
                     <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 flex items-center justify-between gap-3">
@@ -162,10 +182,18 @@ export function renderManzanasView(container) {
                         </div>
                       </div>
 
-                      <button data-face-id="${face.id}"
-                        class="complete-face-btn min-h-[48px] bg-emerald-600 hover:bg-emerald-500 active:scale-95 text-white font-bold px-4 py-2.5 rounded-xl text-xs shadow-sm transition shrink-0">
-                        ✓ Hecha hoy
-                      </button>
+                      ${
+                        editable
+                          ? `<button data-face-id="${face.id}"
+                              class="toggle-face-btn min-h-[44px] ${
+                                doneToday
+                                  ? 'bg-slate-200 hover:bg-slate-300 text-slate-800'
+                                  : 'bg-emerald-600 hover:bg-emerald-500 text-white'
+                              } active:scale-95 font-bold px-3.5 py-2 rounded-xl text-xs shadow-sm transition shrink-0">
+                              ${doneToday ? '↩ Desmarcar' : '✓ Hecha hoy'}
+                            </button>`
+                          : ''
+                      }
                     </div>
                   `;
                 })
@@ -176,7 +204,7 @@ export function renderManzanasView(container) {
     ${showDnvModal ? renderDnvModalHtml() : ''}
   `;
 
-  initLeafletMap(filteredSubterritories, filteredBlocks, filteredFaces);
+  initLeafletMap(container, filteredSubterritories, filteredBlocks, filteredFaces, editable);
 
   document.getElementById('filter-subterritory').onchange = (e) => {
     selectedSubterritoryId = e.target.value;
@@ -188,19 +216,21 @@ export function renderManzanasView(container) {
     renderManzanasView(container);
   };
 
-  document.querySelectorAll('.complete-face-btn').forEach((btn) => {
-    btn.onclick = async () => {
-      const faceId = btn.getAttribute('data-face-id');
-      await markFaceCompleted(faceId, container);
-    };
-  });
+  if (editable) {
+    document.querySelectorAll('.toggle-face-btn').forEach((btn) => {
+      btn.onclick = async () => {
+        const faceId = btn.getAttribute('data-face-id');
+        await toggleFaceCompleted(faceId, container);
+      };
+    });
+  }
 
   if (showDnvModal) {
     bindDnvModalEvents(container);
   }
 }
 
-function initLeafletMap(subterritories, blocks, faces) {
+function initLeafletMap(container, subterritories, blocks, faces, editable) {
   const mapEl = document.getElementById('terr-leaflet-map');
   if (!mapEl || typeof window.L === 'undefined') return;
 
@@ -220,7 +250,7 @@ function initLeafletMap(subterritories, blocks, faces) {
 
   const bounds = [];
 
-  // 1. Dibujar polígonos de territorios generales (solo cuando se ven todos)
+  // 1. Polígonos de territorio general (solo en vista general)
   if (selectedSubterritoryId === 'ALL') {
     state.territories.forEach((t) => {
       if (Array.isArray(t.polygon_coords) && t.polygon_coords.length >= 3) {
@@ -228,70 +258,122 @@ function initLeafletMap(subterritories, blocks, faces) {
           color: '#475569',
           weight: 2,
           dashArray: '6, 6',
-          fillOpacity: 0.04
+          fillOpacity: 0.03,
+          interactive: false
         }).addTo(leafletMap);
-        poly.bindPopup(`<b>${escapeHtml(t.code_or_name)}</b>`);
         t.polygon_coords.forEach((pt) => bounds.push(pt));
       }
     });
   }
 
-  // 2. Dibujar polígonos de subterritorios ("Territorio XX")
+  // 2. Polígonos de Territorios ("Territorio XX")
   subterritories.forEach((sub) => {
     if (Array.isArray(sub.polygon_coords) && sub.polygon_coords.length >= 3) {
-      const poly = window.L.polygon(sub.polygon_coords, {
+      window.L.polygon(sub.polygon_coords, {
         color: '#1e3a8a',
         weight: 3,
         fillColor: '#3b82f6',
-        fillOpacity: 0.08
+        fillOpacity: 0.05,
+        interactive: false
       }).addTo(leafletMap);
-      poly.bindPopup(`<b>Territorio ${escapeHtml(sub.code)}</b>`);
       sub.polygon_coords.forEach((pt) => bounds.push(pt));
     }
   });
 
-  // 3. Dibujar polígonos de manzanas ("Manzana X")
+  // 3. Polígonos de Manzanas (toque en el centro marca/desmarca toda la manzana)
   blocks.forEach((b) => {
+    const blockFaces = state.blockFaces.filter((f) => f.block_id === b.id);
+    const allDoneToday =
+      blockFaces.length > 0 && blockFaces.every((f) => isCompletedToday(f.last_completed_at));
+
     if (Array.isArray(b.polygon_coords) && b.polygon_coords.length >= 3) {
       const poly = window.L.polygon(b.polygon_coords, {
         color: '#334155',
-        weight: 1.5,
-        fillColor: '#94a3b8',
-        fillOpacity: 0.1
+        weight: 1,
+        fillColor: allDoneToday ? '#10b981' : '#94a3b8',
+        fillOpacity: allDoneToday ? 0.32 : 0.14
       }).addTo(leafletMap);
-      poly.bindPopup(`<b>Manzana ${escapeHtml(b.name)}</b>`);
+
+      if (editable) {
+        poly.on('click', async (ev) => {
+          window.L.DomEvent.stopPropagation(ev);
+          await toggleWholeBlock(b.id, container);
+        });
+      } else {
+        poly.bindPopup(`<b>Manzana ${escapeHtml(b.name)}</b>`);
+      }
+
+      // Etiqueta central con la letra de la manzana
+      const centerLat =
+        b.center_lat ||
+        b.polygon_coords.reduce((acc, p) => acc + p[0], 0) / b.polygon_coords.length;
+      const centerLng =
+        b.center_lng ||
+        b.polygon_coords.reduce((acc, p) => acc + p[1], 0) / b.polygon_coords.length;
+
+      const labelIcon = window.L.divIcon({
+        className: 'block-center-label',
+        html: `<div style="
+          background:${allDoneToday ? '#059669' : '#1e293b'};
+          color:#fff;
+          font-weight:800;
+          font-size:11px;
+          width:22px;
+          height:22px;
+          border-radius:9999px;
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          border:2px solid #fff;
+          box-shadow:0 1px 4px rgba(0,0,0,0.35);
+          cursor:pointer;
+        ">${escapeHtml(b.name)}</div>`,
+        iconSize: [22, 22],
+        iconAnchor: [11, 11]
+      });
+
+      const labelMarker = window.L.marker([centerLat, centerLng], { icon: labelIcon }).addTo(
+        leafletMap
+      );
+      if (editable) {
+        labelMarker.on('click', async (ev) => {
+          window.L.DomEvent.stopPropagation(ev);
+          await toggleWholeBlock(b.id, container);
+        });
+      }
+
       b.polygon_coords.forEach((pt) => bounds.push(pt));
-    } else if (b.center_lat && b.center_lng) {
-      const marker = window.L.circleMarker([b.center_lat, b.center_lng], {
-        radius: 8,
-        color: '#1e3a8a',
-        fillColor: '#3b82f6',
-        fillOpacity: 0.85
-      }).addTo(leafletMap);
-      marker.bindPopup(`<b>Manzana ${escapeHtml(b.name)}</b>`);
-      bounds.push([b.center_lat, b.center_lng]);
     }
   });
 
-  // 4. Dibujar caras de manzana con línea de color según antigüedad
+  // 4. Caras de manzana (toque directo en la línea marca/desmarca esa cara)
   faces.forEach((face) => {
     const colorInfo = getFaceAgeColor(face.last_completed_at);
     if (Array.isArray(face.line_coords) && face.line_coords.length >= 2) {
-      const poly = window.L.polyline(face.line_coords, {
+      const line = window.L.polyline(face.line_coords, {
         color: colorInfo.hex,
-        weight: 6,
-        opacity: 0.9
+        weight: 8,
+        opacity: 0.95
       }).addTo(leafletMap);
-      poly.bindPopup(
-        `<b>${escapeHtml(face.street_name)} ${escapeHtml(face.number_range || '')}</b><br>${formatRelativeDate(
-          face.last_completed_at
-        )}`
-      );
+
+      if (editable) {
+        line.on('click', async (ev) => {
+          window.L.DomEvent.stopPropagation(ev);
+          await toggleFaceCompleted(face.id, container);
+        });
+      } else {
+        line.bindPopup(
+          `<b>${escapeHtml(face.street_name)} ${escapeHtml(face.number_range || '')}</b><br>${formatRelativeDate(
+            face.last_completed_at
+          )}`
+        );
+      }
+
       face.line_coords.forEach((pt) => bounds.push(pt));
     }
   });
 
-  // 5. Dibujar casas No Visitar
+  // 5. Casas No Visitar
   state.dnvHouses.forEach((h) => {
     if (h.lat && h.lng) {
       const dnvMarker = window.L.circleMarker([h.lat, h.lng], {
@@ -309,7 +391,7 @@ function initLeafletMap(subterritories, blocks, faces) {
     }
   });
 
-  // 6. Ubicación actual del publicador si activó GPS
+  // 6. Ubicación actual del publicador
   if (state.userLocation) {
     window.L.circleMarker([state.userLocation.lat, state.userLocation.lng], {
       radius: 7,
@@ -323,11 +405,39 @@ function initLeafletMap(subterritories, blocks, faces) {
   }
 
   if (bounds.length > 0) {
-    leafletMap.fitBounds(bounds, { padding: [25, 25], maxZoom: 16 });
+    leafletMap.fitBounds(bounds, { padding: [25, 25], maxZoom: 17 });
   }
 }
 
-async function markFaceCompleted(faceId, container) {
+// Alterna una cara individual: si ya está hecha hoy, la desmarca; si no, la marca hecha hoy
+async function toggleFaceCompleted(faceId, container) {
+  const idx = state.blockFaces.findIndex((f) => f.id === faceId);
+  if (idx === -1) return;
+
+  const face = state.blockFaces[idx];
+  const alreadyToday = isCompletedToday(face.last_completed_at);
+
+  if (alreadyToday) {
+    const { error } = await supabase
+      .from('terr_block_faces')
+      .update({
+        last_completed_at: null,
+        last_completed_by: null
+      })
+      .eq('id', faceId);
+
+    if (error) {
+      showToast('Error al desmarcar cuadra: ' + error.message, 'error');
+      return;
+    }
+
+    state.blockFaces[idx].last_completed_at = null;
+    state.blockFaces[idx].last_completed_by = null;
+    showToast(`↩ Desmarcada: ${face.street_name}`, 'info');
+    renderManzanasView(container);
+    return;
+  }
+
   const nowIso = new Date().toISOString();
   const { error } = await supabase
     .from('terr_block_faces')
@@ -349,12 +459,79 @@ async function markFaceCompleted(faceId, container) {
     completed_at: nowIso
   });
 
-  const idx = state.blockFaces.findIndex((f) => f.id === faceId);
-  if (idx !== -1) {
-    state.blockFaces[idx].last_completed_at = nowIso;
+  state.blockFaces[idx].last_completed_at = nowIso;
+  showToast(`✓ Marcada hecha hoy: ${face.street_name}`, 'success');
+  renderManzanasView(container);
+}
+
+// Alterna toda la manzana completa: si todas las caras están hechas hoy, desmarca todas; si no, marca todas
+async function toggleWholeBlock(blockId, container) {
+  const block = state.blocks.find((b) => b.id === blockId);
+  const blockFaces = state.blockFaces.filter((f) => f.block_id === blockId);
+  if (!block || blockFaces.length === 0) return;
+
+  const allDoneToday = blockFaces.every((f) => isCompletedToday(f.last_completed_at));
+  const faceIds = blockFaces.map((f) => f.id);
+
+  if (allDoneToday) {
+    const { error } = await supabase
+      .from('terr_block_faces')
+      .update({
+        last_completed_at: null,
+        last_completed_by: null
+      })
+      .in('id', faceIds);
+
+    if (error) {
+      showToast('Error al desmarcar manzana: ' + error.message, 'error');
+      return;
+    }
+
+    state.blockFaces.forEach((f) => {
+      if (f.block_id === blockId) {
+        f.last_completed_at = null;
+        f.last_completed_by = null;
+      }
+    });
+
+    showToast(`↩ Manzana ${block.name} desmarcada por completo`, 'info');
+    renderManzanasView(container);
+    return;
   }
 
-  showToast('¡Cuadra marcada como completada hoy!', 'success');
+  const nowIso = new Date().toISOString();
+  const { error } = await supabase
+    .from('terr_block_faces')
+    .update({
+      last_completed_at: nowIso,
+      last_completed_by: state.profile.id
+    })
+    .in('id', faceIds);
+
+  if (error) {
+    showToast('Error al marcar manzana completa: ' + error.message, 'error');
+    return;
+  }
+
+  const pendingFaces = blockFaces.filter((f) => !isCompletedToday(f.last_completed_at));
+  if (pendingFaces.length > 0) {
+    await supabase.from('terr_block_face_logs').insert(
+      pendingFaces.map((f) => ({
+        congregation_id: state.congregation.id,
+        face_id: f.id,
+        user_id: state.profile.id,
+        completed_at: nowIso
+      }))
+    );
+  }
+
+  state.blockFaces.forEach((f) => {
+    if (f.block_id === blockId) {
+      f.last_completed_at = nowIso;
+    }
+  });
+
+  showToast(`✓ Manzana ${block.name} completa marcada hoy`, 'success');
   renderManzanasView(container);
 }
 
