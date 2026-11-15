@@ -2,7 +2,8 @@ import { supabase } from './supabase.js';
 import { state, isAdmin } from './state.js';
 import { showToast, escapeHtml } from './ui-helpers.js';
 
-let showNewScheduleModal = false;
+let showScheduleModal = false;
+let editingScheduleId = null;
 let hermanosList = [];
 let conductoresList = [];
 
@@ -64,15 +65,18 @@ export async function loadSchedulesAndPoints() {
   }
 }
 
-function getDayNameUpper(isoDate) {
+function getDayAndDateLabel(isoDate) {
   if (!isoDate) return '';
   const [y, m, d] = isoDate.split('-').map(Number);
   const dt = new Date(y, m - 1, d);
-  return dt
+  const dayName = dt
     .toLocaleDateString('es-AR', { weekday: 'long' })
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .toUpperCase();
+  const dd = String(d).padStart(2, '0');
+  const mm = String(m).padStart(2, '0');
+  return `${dayName} ${dd}/${mm}`;
 }
 
 function formatDateSpanish(isoDate) {
@@ -194,7 +198,7 @@ function buildScheduleTableHtml(list, { adminMode = false } = {}) {
             ${list
               .map((s, idx) => {
                 const rowBg = idx % 2 === 0 ? 'bg-white' : 'bg-[#dceaf7]';
-                const dayLabel = getDayNameUpper(s.date);
+                const dayLabel = getDayAndDateLabel(s.date);
                 const timeLabel = formatTimeShort(s.time);
                 const placeLabel = (s.meeting_point_text || '').toUpperCase();
                 const groupsLabel = (s.groups_assigned || '').toUpperCase();
@@ -230,10 +234,15 @@ function buildScheduleTableHtml(list, { adminMode = false } = {}) {
                                 title="Enviar WhatsApp al conductor">
                                 ${getWhatsAppSvgIcon()}
                               </button>
+                              <button data-edit-sched="${s.id}"
+                                class="edit-sched-btn inline-flex items-center justify-center w-8 h-8 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold text-sm transition"
+                                title="Editar salida">
+                                ✎
+                              </button>
                               <button data-del-sched="${s.id}"
                                 class="del-sched-btn inline-flex items-center justify-center w-8 h-8 rounded-lg bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold text-xs transition"
                                 title="Eliminar fila">
-                                \u{1F5D1}\uFE0F
+                                ✕
                               </button>
                             </div>
                           </td>`
@@ -268,7 +277,7 @@ export function renderSalidasView(container) {
                 <button id="btn-copy-public-link"
                   class="bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-3 px-3.5 rounded-xl text-xs border border-slate-200 transition"
                   title="Copiar enlace público de cartelera">
-                  \u{1F517} Link Público
+                  Link Público
                 </button>
               </div>
               <div class="text-[11px] text-slate-500">
@@ -283,12 +292,13 @@ export function renderSalidasView(container) {
 
       ${buildScheduleTableHtml(state.schedules, { adminMode })}
     </div>
-    ${showNewScheduleModal ? renderNewScheduleModalHtml() : ''}
+    ${showScheduleModal ? renderScheduleModalHtml() : ''}
   `;
 
   if (adminMode) {
     document.getElementById('btn-new-schedule').onclick = () => {
-      showNewScheduleModal = true;
+      editingScheduleId = null;
+      showScheduleModal = true;
       renderSalidasView(container);
     };
 
@@ -296,6 +306,14 @@ export function renderSalidasView(container) {
       await navigator.clipboard.writeText(publicUrl);
       showToast('Enlace de cartelera pública copiado', 'success');
     };
+
+    document.querySelectorAll('.edit-sched-btn').forEach((btn) => {
+      btn.onclick = () => {
+        editingScheduleId = btn.getAttribute('data-edit-sched');
+        showScheduleModal = true;
+        renderSalidasView(container);
+      };
+    });
 
     document.querySelectorAll('.del-sched-btn').forEach((btn) => {
       btn.onclick = async () => {
@@ -359,32 +377,45 @@ export function renderSalidasView(container) {
     };
   });
 
-  if (showNewScheduleModal) {
-    bindNewScheduleModalEvents(container);
+  if (showScheduleModal) {
+    bindScheduleModalEvents(container);
   }
 }
 
-function renderNewScheduleModalHtml() {
+function renderScheduleModalHtml() {
   const sourceList = conductoresList.length > 0 ? conductoresList : hermanosList;
+  const editingItem = editingScheduleId
+    ? state.schedules.find((x) => x.id === editingScheduleId)
+    : null;
+
+  const dateVal = editingItem?.date || '';
+  const timeVal = editingItem?.time ? formatTimeShort(editingItem.time) : '09:45';
+  const placeVal = editingItem?.meeting_point_text || '';
+  const conductorVal = editingItem?.conductor_name || '';
+  const groupsVal = editingItem ? (editingItem.groups_assigned || '') : 'CONGREGACIONAL';
+  const terrsVal = editingItem?.assigned_subterritories || '';
+  const isSpecial = Boolean(editingItem?.is_special_event);
 
   return `
     <div class="fixed inset-0 z-50 bg-slate-950/70 flex items-center justify-center p-4 overflow-y-auto">
       <div class="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl space-y-3 my-6">
         <div class="flex items-center justify-between">
-          <h3 class="text-lg font-extrabold text-slate-900">Nueva Salida</h3>
-          <button id="close-sched-modal" class="text-slate-400 hover:text-slate-700 text-xl font-bold">\u2715</button>
+          <h3 class="text-lg font-extrabold text-slate-900">
+            ${editingItem ? 'Editar Salida' : 'Nueva Salida'}
+          </h3>
+          <button id="close-sched-modal" class="text-slate-400 hover:text-slate-700 text-xl font-bold">✕</button>
         </div>
 
         <form id="new-schedule-form" class="space-y-3">
           <div class="grid grid-cols-2 gap-2">
             <div>
               <label class="block text-xs font-bold text-slate-700 mb-1">Fecha</label>
-              <input type="date" id="sched-date" required
+              <input type="date" id="sched-date" required value="${escapeHtml(dateVal)}"
                 class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm" />
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-700 mb-1">Hora</label>
-              <input type="time" id="sched-time" required value="09:45"
+              <input type="time" id="sched-time" required value="${escapeHtml(timeVal)}"
                 class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm" />
             </div>
           </div>
@@ -398,15 +429,16 @@ function renderNewScheduleModalHtml() {
                     ${state.meetingPoints
                       .map(
                         (mp) =>
-                          `<option value="${escapeHtml(mp.name_and_address)}">${escapeHtml(
-                            mp.name_and_address
-                          )}</option>`
+                          `<option value="${escapeHtml(mp.name_and_address)}" ${
+                            mp.name_and_address === placeVal ? 'selected' : ''
+                          }>${escapeHtml(mp.name_and_address)}</option>`
                       )
                       .join('')}
                   </select>`
                 : ''
             }
-            <input type="text" id="sched-mp-text" required placeholder="Ej: FLIA. RESSIA (BOLIVAR 3020) o REUNION"
+            <input type="text" id="sched-mp-text" required value="${escapeHtml(placeVal)}"
+              placeholder="Ej: FLIA. RESSIA (BOLIVAR 3020) o REUNION"
               class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm" />
           </div>
 
@@ -419,17 +451,18 @@ function renderNewScheduleModalHtml() {
                 .map((h) => {
                   const hasPhone =
                     h.celular && !String(h.celular).toLowerCase().includes('sin tel');
-                  const phoneTag = hasPhone ? ` · \u{1F4F1} ${h.celular}` : ' · sin tel.';
-                  return `<option value="${escapeHtml(h.nombre)}">${escapeHtml(h.nombre)}${escapeHtml(
-                    phoneTag
-                  )}</option>`;
+                  const phoneTag = hasPhone ? ` · Tel: ${h.celular}` : ' · sin tel.';
+                  const isSelected = normalizeName(h.nombre) === normalizeName(conductorVal);
+                  return `<option value="${escapeHtml(h.nombre)}" ${
+                    isSelected ? 'selected' : ''
+                  }>${escapeHtml(h.nombre)}${escapeHtml(phoneTag)}</option>`;
                 })
                 .join('')}
             </select>
             ${
               conductoresList.length === 0
                 ? `<p class="text-[11px] text-amber-700 mt-1">
-                    Sugerencia: asigná el rol <b>Conductor</b> en <b>Admin \u2192 Usuarios</b> para filtrar solo conductores habilitados.
+                    Sugerencia: asigná el rol <b>Conductor</b> en <b>Admin → Usuarios</b> para filtrar solo conductores habilitados.
                   </p>`
                 : ''
             }
@@ -438,24 +471,26 @@ function renderNewScheduleModalHtml() {
           <div class="grid grid-cols-2 gap-2">
             <div>
               <label class="block text-xs font-bold text-slate-700 mb-1">Grupos</label>
-              <input type="text" id="sched-groups" value="CONGREGACIONAL" placeholder="Ej: CONGREGACIONAL o 1, 2"
+              <input type="text" id="sched-groups" value="${escapeHtml(groupsVal)}"
+                placeholder="Ej: CONGREGACIONAL o 1, 2"
                 class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm" />
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-700 mb-1">Territorio</label>
-              <input type="text" id="sched-terrs" placeholder="Ej: 26, 25, 24"
+              <input type="text" id="sched-terrs" value="${escapeHtml(terrsVal)}"
+                placeholder="Ej: 26, 25, 24"
                 class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm" />
             </div>
           </div>
 
           <label class="flex items-center gap-2 text-xs font-semibold text-slate-700 pt-1">
-            <input type="checkbox" id="sched-special" class="rounded" />
+            <input type="checkbox" id="sched-special" ${isSpecial ? 'checked' : ''} class="rounded" />
             <span>Campaña o evento especial</span>
           </label>
 
           <button type="submit"
             class="w-full bg-blue-900 hover:bg-blue-800 text-white font-bold py-3 rounded-xl text-sm shadow">
-            Guardar Salida
+            ${editingItem ? 'Guardar Cambios' : 'Guardar Salida'}
           </button>
         </form>
       </div>
@@ -463,9 +498,10 @@ function renderNewScheduleModalHtml() {
   `;
 }
 
-function bindNewScheduleModalEvents(container) {
+function bindScheduleModalEvents(container) {
   document.getElementById('close-sched-modal').onclick = () => {
-    showNewScheduleModal = false;
+    showScheduleModal = false;
+    editingScheduleId = null;
     renderSalidasView(container);
   };
 
@@ -493,6 +529,29 @@ function bindNewScheduleModalEvents(container) {
       is_special_event: document.getElementById('sched-special').checked
     };
 
+    if (editingScheduleId) {
+      const { data, error } = await supabase
+        .from('terr_schedules')
+        .update(payload)
+        .eq('id', editingScheduleId)
+        .select()
+        .single();
+
+      if (error) {
+        showToast('Error al actualizar salida: ' + error.message, 'error');
+        return;
+      }
+
+      const idx = state.schedules.findIndex((x) => x.id === editingScheduleId);
+      if (idx !== -1) state.schedules[idx] = data;
+      state.schedules.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+      showScheduleModal = false;
+      editingScheduleId = null;
+      showToast('Salida actualizada correctamente', 'success');
+      renderSalidasView(container);
+      return;
+    }
+
     const { data, error } = await supabase
       .from('terr_schedules')
       .insert(payload)
@@ -506,7 +565,8 @@ function bindNewScheduleModalEvents(container) {
 
     state.schedules.push(data);
     state.schedules.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
-    showNewScheduleModal = false;
+    showScheduleModal = false;
+    editingScheduleId = null;
     showToast('Salida programada correctamente', 'success');
     renderSalidasView(container);
   };
@@ -567,7 +627,7 @@ export async function renderPublicCartelera(container, slug) {
 
         <div class="pt-4 text-center">
           <a href="${window.location.pathname}" class="text-xs font-bold text-blue-900 underline">
-            Ingresar a la app de Territorios \u2192
+            Ingresar a la app de Territorios →
           </a>
         </div>
       </main>
