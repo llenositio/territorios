@@ -287,13 +287,87 @@ function bindGeneralAdminEvents(container, onDataChanged, superMode) {
 }
 
 // ============================================================================
-// SUBPESTAÑA 2: MAPEADOR POR CALLES PERIMETRALES
+// SUBPESTAÑA 2: MAPEADOR POR CALLES Y REINICIO DE PREDICACIÓN
 // ============================================================================
 function renderPolygonMapperHtml() {
   const city = state.settings?.city || 'Mar del Plata';
 
   return `
     <div class="space-y-4">
+      <!-- PANEL DE REINICIO PARA ARMAR SALIDAS -->
+      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
+        <div>
+          <h3 class="text-base font-extrabold text-slate-900">🔄 Reiniciar para Predicar de Nuevo</h3>
+          <p class="text-xs text-slate-500 mt-0.5">
+            Habilitá un territorio completo, una manzana o una cara puntual para volver a asignarlos en una salida.
+          </p>
+        </div>
+
+        <div class="space-y-2.5">
+          <div>
+            <label class="block text-xs font-bold text-slate-700 mb-1">¿Qué querés reiniciar?</label>
+            <select id="reset-scope-select"
+              class="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-xs font-bold bg-white">
+              <option value="subterritory">Territorio completo (todas sus manzanas y caras)</option>
+              <option value="block">Manzana individual (sus 4 caras)</option>
+              <option value="face">Cara / Cuadra puntual</option>
+            </select>
+          </div>
+
+          <div id="reset-subterritory-box">
+            <label class="block text-xs font-bold text-slate-700 mb-1">Elegir Territorio</label>
+            <select id="reset-subterritory-id"
+              class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white">
+              <option value="">-- Elegir Territorio --</option>
+              ${state.subterritories
+                .map((s) => `<option value="${s.id}">Territorio ${escapeHtml(s.code)}</option>`)
+                .join('')}
+            </select>
+          </div>
+
+          <div id="reset-block-box" class="hidden">
+            <label class="block text-xs font-bold text-slate-700 mb-1">Elegir Manzana</label>
+            <select id="reset-block-id"
+              class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white">
+              <option value="">-- Elegir Manzana --</option>
+              ${state.blocks
+                .map((b) => {
+                  const sub = state.subterritories.find((s) => s.id === b.subterritory_id);
+                  return `<option value="${b.id}">${
+                    sub ? `T-${escapeHtml(sub.code)} · ` : ''
+                  }Manzana ${escapeHtml(b.name)}</option>`;
+                })
+                .join('')}
+            </select>
+          </div>
+
+          <div id="reset-face-box" class="hidden">
+            <label class="block text-xs font-bold text-slate-700 mb-1">Elegir Cara / Cuadra</label>
+            <select id="reset-face-id"
+              class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white">
+              <option value="">-- Elegir Cuadra --</option>
+              ${state.blockFaces
+                .map((f) => {
+                  const blk = state.blocks.find((b) => b.id === f.block_id);
+                  const sub = state.subterritories.find((s) => s.id === blk?.subterritory_id);
+                  return `<option value="${f.id}">${
+                    sub ? `T-${escapeHtml(sub.code)} · ` : ''
+                  }${blk ? `Mz. ${escapeHtml(blk.name)} · ` : ''}${escapeHtml(
+                    f.street_name
+                  )}</option>`;
+                })
+                .join('')}
+            </select>
+          </div>
+
+          <button type="button" id="btn-reset-predicacion"
+            class="w-full bg-rose-600 hover:bg-rose-500 text-white font-bold py-2.5 rounded-xl text-xs shadow transition">
+            🔄 Reiniciar (Dejar listo para predicar)
+          </button>
+        </div>
+      </div>
+
+      <!-- MAPEADOR POR CALLES PERIMETRALES -->
       <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
         <div>
           <h3 class="text-base font-extrabold text-slate-900">🗺️ Mapear por Calles Perimetrales</h3>
@@ -360,7 +434,7 @@ function renderPolygonMapperHtml() {
               Calles del perímetro en orden (separadas por coma o una por línea)
             </label>
             <textarea id="poly-streets-input" rows="4"
-              placeholder="Ej: 3 de Febrero, Santa Fe, Av Colón, Córdoba, Alvarado, 20 de Septiembre, Av Pedro Luro, Av Independencia"
+              placeholder="Ej: 3 de Febrero, San Luis, 9 de Julio, Mitre"
               class="w-full p-3 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-800 outline-none">${escapeHtml(
                 polyStreetNames.join(', ')
               )}</textarea>
@@ -547,6 +621,87 @@ function initAdminPolyPreviewMap() {
 }
 
 function bindPolygonMapperEvents(container, onDataChanged) {
+  // Eventos del panel de Reinicio para Armar Salidas
+  const resetScope = document.getElementById('reset-scope-select');
+  const resetSubBox = document.getElementById('reset-subterritory-box');
+  const resetBlockBox = document.getElementById('reset-block-box');
+  const resetFaceBox = document.getElementById('reset-face-box');
+
+  resetScope.onchange = () => {
+    const val = resetScope.value;
+    resetSubBox.classList.toggle('hidden', val !== 'subterritory');
+    resetBlockBox.classList.toggle('hidden', val !== 'block');
+    resetFaceBox.classList.toggle('hidden', val !== 'face');
+  };
+
+  document.getElementById('btn-reset-predicacion').onclick = async () => {
+    const scope = resetScope.value;
+    let faceIdsToReset = [];
+    let label = '';
+
+    if (scope === 'subterritory') {
+      const subId = document.getElementById('reset-subterritory-id').value;
+      if (!subId) {
+        showToast('Elegí un Territorio para reiniciar', 'error');
+        return;
+      }
+      const sub = state.subterritories.find((s) => s.id === subId);
+      const blockIds = new Set(
+        state.blocks.filter((b) => b.subterritory_id === subId).map((b) => b.id)
+      );
+      faceIdsToReset = state.blockFaces.filter((f) => blockIds.has(f.block_id)).map((f) => f.id);
+      label = `Territorio ${sub?.code || ''}`;
+    } else if (scope === 'block') {
+      const blkId = document.getElementById('reset-block-id').value;
+      if (!blkId) {
+        showToast('Elegí una Manzana para reiniciar', 'error');
+        return;
+      }
+      const blk = state.blocks.find((b) => b.id === blkId);
+      faceIdsToReset = state.blockFaces.filter((f) => f.block_id === blkId).map((f) => f.id);
+      label = `Manzana ${blk?.name || ''}`;
+    } else if (scope === 'face') {
+      const faceId = document.getElementById('reset-face-id').value;
+      if (!faceId) {
+        showToast('Elegí una Cuadra para reiniciar', 'error');
+        return;
+      }
+      const face = state.blockFaces.find((f) => f.id === faceId);
+      faceIdsToReset = [faceId];
+      label = `Cuadra ${face?.street_name || ''}`;
+    }
+
+    if (faceIdsToReset.length === 0) {
+      showToast('No hay caras cargadas en esa selección', 'warning');
+      return;
+    }
+
+    const { error } = await supabase
+      .from('terr_block_faces')
+      .update({
+        last_completed_at: null,
+        last_completed_by: null
+      })
+      .in('id', faceIdsToReset);
+
+    if (error) {
+      showToast('Error al reiniciar: ' + error.message, 'error');
+      return;
+    }
+
+    const idSet = new Set(faceIdsToReset);
+    state.blockFaces.forEach((f) => {
+      if (idSet.has(f.id)) {
+        f.last_completed_at = null;
+        f.last_completed_by = null;
+      }
+    });
+
+    showToast(`🔄 ${label} reiniciado (${faceIdsToReset.length} caras habilitadas)`, 'success');
+    if (onDataChanged) await onDataChanged();
+  };
+
+  // Eventos del Mapeador Poligonal
   const typeSelect = document.getElementById('poly-entity-type');
   const parentTerrBox = document.getElementById('poly-parent-territory-box');
   const parentSubBox = document.getElementById('poly-parent-subterritory-box');
