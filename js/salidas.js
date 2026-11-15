@@ -3,11 +3,12 @@ import { state, isAdmin } from './state.js';
 import { showToast, escapeHtml } from './ui-helpers.js';
 
 let showNewScheduleModal = false;
+let hermanosList = [];
 
 export async function loadSchedulesAndPoints() {
   if (!state.congregation?.id) return;
 
-  const [schedRes, mpRes] = await Promise.all([
+  const [schedRes, mpRes, hermRes] = await Promise.all([
     supabase
       .from('terr_schedules')
       .select('*')
@@ -19,11 +20,28 @@ export async function loadSchedulesAndPoints() {
       .from('terr_meeting_points')
       .select('*')
       .eq('congregation_id', state.congregation.id)
-      .order('name_and_address', { ascending: true })
+      .order('name_and_address', { ascending: true }),
+    supabase
+      .from('hermanos')
+      .select('id, nombre, celular')
+      .eq('congregacion_id', state.congregation.id)
+      .order('nombre', { ascending: true })
   ]);
 
   if (!schedRes.error) state.schedules = schedRes.data || [];
   if (!mpRes.error) state.meetingPoints = mpRes.data || [];
+  if (!hermRes.error) hermanosList = hermRes.data || [];
+}
+
+function getDayNameUpper(isoDate) {
+  if (!isoDate) return '';
+  const [y, m, d] = isoDate.split('-').map(Number);
+  const dt = new Date(y, m - 1, d);
+  return dt
+    .toLocaleDateString('es-AR', { weekday: 'long' })
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase();
 }
 
 function formatDateSpanish(isoDate) {
@@ -37,13 +55,137 @@ function formatDateSpanish(isoDate) {
   });
 }
 
+function formatTimeShort(timeStr) {
+  if (!timeStr) return '';
+  return timeStr.slice(0, 5);
+}
+
+function normalizeName(str) {
+  return (str || '')
+    .toLowerCase()
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function findConductorPhone(conductorName) {
+  if (!conductorName) return null;
+  const target = normalizeName(conductorName);
+  if (!target) return null;
+
+  // Coincidencia exacta primero, luego coincidencia parcial
+  let match = hermanosList.find((h) => normalizeName(h.nombre) === target);
+  if (!match) {
+    match = hermanosList.find(
+      (h) =>
+        normalizeName(h.nombre).includes(target) ||
+        target.includes(normalizeName(h.nombre))
+    );
+  }
+
+  if (!match || !match.celular) return null;
+  const digits = String(match.celular).replace(/\D/g, '');
+  if (!digits || digits.length < 8) return null;
+
+  // Normalizar formato internacional WhatsApp Argentina (549 + 10 dígitos)
+  if (digits.startsWith('549') && digits.length >= 12) return digits;
+  if (digits.startsWith('54') && digits.length === 12) return '549' + digits.slice(2);
+  if (digits.startsWith('0')) return '549' + digits.slice(1);
+  if (digits.length === 10) return '549' + digits;
+  return digits;
+}
+
+function buildScheduleTableHtml(list, { adminMode = false } = {}) {
+  if (!list || list.length === 0) {
+    return `
+      <div class="bg-white p-8 rounded-2xl text-center text-slate-500 border border-slate-200">
+        <p class="font-semibold">No hay salidas programadas próximamente</p>
+      </div>`;
+  }
+
+  return `
+    <div class="bg-white rounded-2xl shadow-sm border border-slate-300 overflow-hidden">
+      <div class="overflow-x-auto">
+        <table class="w-full border-collapse text-center text-xs sm:text-[13px]">
+          <thead>
+            <tr class="bg-[#2b6cb0] text-white font-extrabold tracking-wide uppercase">
+              <th class="py-2.5 px-2.5 border border-[#1e4e8c]">DÍA</th>
+              <th class="py-2.5 px-2 border border-[#1e4e8c]">HORA</th>
+              <th class="py-2.5 px-3 border border-[#1e4e8c]">LUGAR</th>
+              <th class="py-2.5 px-2.5 border border-[#1e4e8c]">GRUPOS</th>
+              <th class="py-2.5 px-3 border border-[#1e4e8c]">CONDUCTOR</th>
+              <th class="py-2.5 px-2.5 border border-[#1e4e8c]">TERRITORIO</th>
+              ${adminMode ? `<th class="py-2.5 px-2 border border-[#1e4e8c]">ACCIÓN</th>` : ''}
+            </tr>
+          </thead>
+          <tbody>
+            ${list
+              .map((s, idx) => {
+                const rowBg = idx % 2 === 0 ? 'bg-white' : 'bg-[#dceaf7]';
+                const dayLabel = getDayNameUpper(s.date);
+                const timeLabel = formatTimeShort(s.time);
+                const placeLabel = (s.meeting_point_text || '').toUpperCase();
+                const groupsLabel = (s.groups_assigned || '').toUpperCase();
+                const conductorLabel = (s.conductor_name || '').toUpperCase();
+                const terrLabel = (s.assigned_subterritories || '').toUpperCase();
+
+                return `
+                  <tr class="${rowBg} text-slate-900">
+                    <td class="py-2.5 px-2.5 border border-slate-300 font-extrabold whitespace-nowrap">
+                      ${escapeHtml(dayLabel)}
+                    </td>
+                    <td class="py-2.5 px-2 border border-slate-300 font-extrabold whitespace-nowrap">
+                      ${escapeHtml(timeLabel)}
+                    </td>
+                    <td class="py-2.5 px-3 border border-slate-300 font-semibold">
+                      ${escapeHtml(placeLabel)}
+                    </td>
+                    <td class="py-2.5 px-2.5 border border-slate-300 font-semibold whitespace-nowrap">
+                      ${escapeHtml(groupsLabel)}
+                    </td>
+                    <td class="py-2.5 px-3 border border-slate-300 font-semibold whitespace-nowrap">
+                      ${escapeHtml(conductorLabel)}
+                    </td>
+                    <td class="py-2.5 px-2.5 border border-slate-300 font-extrabold whitespace-nowrap">
+                      ${escapeHtml(terrLabel)}
+                    </td>
+                    ${
+                      adminMode
+                        ? `<td class="py-2 px-2 border border-slate-300 whitespace-nowrap">
+                            <div class="inline-flex items-center gap-1">
+                              <button data-sched-id="${s.id}"
+                                class="send-wa-btn bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-2 py-1 rounded text-[11px]"
+                                title="Enviar WhatsApp al conductor">
+                                📲
+                              </button>
+                              <button data-del-sched="${s.id}"
+                                class="del-sched-btn bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold px-2 py-1 rounded text-[11px]"
+                                title="Eliminar fila">
+                                🗑️
+                              </button>
+                            </div>
+                          </td>`
+                        : ''
+                    }
+                  </tr>
+                `;
+              })
+              .join('')}
+          </tbody>
+        </table>
+      </div>
+    </div>
+  `;
+}
+
 export function renderSalidasView(container) {
   const adminMode = isAdmin();
   const publicSlug = state.settings?.slug || '';
   const publicUrl = `${window.location.origin}${window.location.pathname}#/salidas/${publicSlug}`;
 
   container.innerHTML = `
-    <div class="space-y-4 pb-24">
+    <div class="space-y-4 pb-24 max-w-4xl mx-auto">
       ${
         adminMode
           ? `<div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
@@ -68,67 +210,7 @@ export function renderSalidasView(container) {
           : ''
       }
 
-      ${
-        state.schedules.length === 0
-          ? `<div class="bg-white p-8 rounded-2xl text-center text-slate-500 border border-slate-200">
-              <p class="font-semibold">No hay salidas programadas próximamente</p>
-            </div>`
-          : `<div class="space-y-3">
-              ${state.schedules
-                .map(
-                  (s) => `
-                  <div class="bg-white p-4 rounded-2xl shadow-sm border ${
-                    s.is_special_event ? 'border-amber-300 bg-amber-50/30' : 'border-slate-200'
-                  } space-y-2">
-                    <div class="flex items-center justify-between">
-                      <span class="text-xs font-extrabold uppercase tracking-wide text-blue-900">
-                        📅 ${escapeHtml(formatDateSpanish(s.date))} • ${escapeHtml(s.time)} hs
-                      </span>
-                      <div class="flex items-center gap-1.5">
-                        <button data-sched-id="${s.id}"
-                          class="copy-wa-btn bg-emerald-50 hover:bg-emerald-100 text-emerald-800 font-bold px-2.5 py-1 rounded-lg text-xs border border-emerald-200">
-                          📲 WhatsApp
-                        </button>
-                        ${
-                          adminMode
-                            ? `<button data-del-sched="${s.id}"
-                                class="del-sched-btn text-rose-500 hover:text-rose-700 font-bold px-2 py-1 text-xs">
-                                🗑️
-                              </button>`
-                            : ''
-                        }
-                      </div>
-                    </div>
-
-                    <div class="font-extrabold text-slate-900 text-base">
-                      📍 ${escapeHtml(s.meeting_point_text)}
-                    </div>
-
-                    <div class="grid grid-cols-2 gap-2 text-xs text-slate-600 pt-1">
-                      ${
-                        s.conductor_name
-                          ? `<div><b>Conductor:</b> ${escapeHtml(s.conductor_name)}</div>`
-                          : ''
-                      }
-                      ${
-                        s.groups_assigned
-                          ? `<div><b>Grupos:</b> ${escapeHtml(s.groups_assigned)}</div>`
-                          : ''
-                      }
-                      ${
-                        s.assigned_subterritories
-                          ? `<div class="col-span-2"><b>Territorios:</b> <span class="font-bold text-blue-900">${escapeHtml(
-                              s.assigned_subterritories
-                            )}</span></div>`
-                          : ''
-                      }
-                    </div>
-                  </div>
-                `
-                )
-                .join('')}
-            </div>`
-      }
+      ${buildScheduleTableHtml(state.schedules, { adminMode })}
     </div>
     ${showNewScheduleModal ? renderNewScheduleModalHtml() : ''}
   `;
@@ -158,24 +240,40 @@ export function renderSalidasView(container) {
     });
   }
 
-  document.querySelectorAll('.copy-wa-btn').forEach((btn) => {
-    btn.onclick = async () => {
+  document.querySelectorAll('.send-wa-btn').forEach((btn) => {
+    btn.onclick = () => {
       const id = btn.getAttribute('data-sched-id');
       const item = state.schedules.find((x) => x.id === id);
       if (!item) return;
+
+      const phone = findConductorPhone(item.conductor_name);
+      const saludo = item.conductor_name ? `Hola ${item.conductor_name}, ` : 'Hola, ';
+
       const text = [
-        `*SALIDA AL SERVICIO*`,
-        `📅 *Día:* ${formatDateSpanish(item.date)} - ${item.time} hs`,
-        `📍 *Punto de encuentro:* ${item.meeting_point_text}`,
-        item.conductor_name ? `👤 *Conductor:* ${item.conductor_name}` : null,
+        `${saludo}te paso los datos de la salida al servicio que tenés asignada:`,
+        ``,
+        `📅 *Día:* ${formatDateSpanish(item.date)}`,
+        `⏰ *Hora:* ${formatTimeShort(item.time)} hs`,
+        `📍 *Lugar:* ${item.meeting_point_text}`,
         item.groups_assigned ? `👥 *Grupos:* ${item.groups_assigned}` : null,
         item.assigned_subterritories ? `🗺️ *Territorios:* ${item.assigned_subterritories}` : null
       ]
-        .filter(Boolean)
+        .filter((line) => line !== null)
         .join('\n');
 
-      await navigator.clipboard.writeText(text);
-      showToast('Texto copiado listo para pegar en WhatsApp', 'success');
+      const encoded = encodeURIComponent(text);
+
+      if (phone) {
+        window.open(`https://wa.me/${phone}?text=${encoded}`, '_blank');
+      } else {
+        showToast(
+          item.conductor_name
+            ? `No se encontró celular para "${item.conductor_name}". Elegí el contacto en WhatsApp.`
+            : 'Elegí el contacto en WhatsApp',
+          'warning'
+        );
+        window.open(`https://wa.me/?text=${encoded}`, '_blank');
+      }
     };
   });
 
@@ -202,13 +300,13 @@ function renderNewScheduleModalHtml() {
             </div>
             <div>
               <label class="block text-xs font-bold text-slate-700 mb-1">Hora</label>
-              <input type="time" id="sched-time" required value="09:30"
+              <input type="time" id="sched-time" required value="09:45"
                 class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm" />
             </div>
           </div>
 
           <div>
-            <label class="block text-xs font-bold text-slate-700 mb-1">Punto de encuentro</label>
+            <label class="block text-xs font-bold text-slate-700 mb-1">Lugar / Actividad</label>
             ${
               state.meetingPoints.length > 0
                 ? `<select id="sched-mp-select" class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm bg-white mb-1.5">
@@ -224,25 +322,40 @@ function renderNewScheduleModalHtml() {
                   </select>`
                 : ''
             }
-            <input type="text" id="sched-mp-text" required placeholder="Ej: Salón del Reino / Casa flia. Pérez"
+            <input type="text" id="sched-mp-text" required placeholder="Ej: FLIA. RESSIA (BOLIVAR 3020) o REUNION"
               class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm" />
           </div>
 
           <div>
             <label class="block text-xs font-bold text-slate-700 mb-1">Conductor</label>
-            <input type="text" id="sched-conductor" placeholder="Nombre del hermano"
+            ${
+              hermanosList.length > 0
+                ? `<select id="sched-conductor-select" class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm bg-white mb-1.5">
+                    <option value="">-- Elegir de la lista o escribir abajo --</option>
+                    ${hermanosList
+                      .map(
+                        (h) =>
+                          `<option value="${escapeHtml(h.nombre)}">${escapeHtml(h.nombre)}${
+                            h.celular && h.celular !== 'Sin teléfono' ? ` (${escapeHtml(h.celular)})` : ''
+                          }</option>`
+                      )
+                      .join('')}
+                  </select>`
+                : ''
+            }
+            <input type="text" id="sched-conductor" placeholder="Nombre del conductor (opcional)"
               class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm" />
           </div>
 
           <div class="grid grid-cols-2 gap-2">
             <div>
               <label class="block text-xs font-bold text-slate-700 mb-1">Grupos</label>
-              <input type="text" id="sched-groups" placeholder="Ej: 1 y 2 / Todos"
+              <input type="text" id="sched-groups" value="CONGREGACIONAL" placeholder="Ej: CONGREGACIONAL o 1, 2"
                 class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm" />
             </div>
             <div>
-              <label class="block text-xs font-bold text-slate-700 mb-1">Territorios</label>
-              <input type="text" id="sched-terrs" placeholder="Ej: 4A, 4B"
+              <label class="block text-xs font-bold text-slate-700 mb-1">Territorio</label>
+              <input type="text" id="sched-terrs" placeholder="Ej: 26, 25, 24"
                 class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm" />
             </div>
           </div>
@@ -273,6 +386,15 @@ function bindNewScheduleModalEvents(container) {
     mpSelect.onchange = () => {
       if (mpSelect.value) {
         document.getElementById('sched-mp-text').value = mpSelect.value;
+      }
+    };
+  }
+
+  const condSelect = document.getElementById('sched-conductor-select');
+  if (condSelect) {
+    condSelect.onchange = () => {
+      if (condSelect.value) {
+        document.getElementById('sched-conductor').value = condSelect.value;
       }
     };
   }
@@ -330,13 +452,21 @@ export async function renderPublicCartelera(container, slug) {
     return;
   }
 
-  const { data: schedules } = await supabase
+  let query = supabase
     .from('terr_schedules')
     .select('*')
     .eq('congregation_id', settings.congregation_id)
     .order('date', { ascending: true })
     .order('time', { ascending: true });
 
+  if (settings.public_schedule_start_date) {
+    query = query.gte('date', settings.public_schedule_start_date);
+  }
+  if (settings.public_schedule_end_date) {
+    query = query.lte('date', settings.public_schedule_end_date);
+  }
+
+  const { data: schedules } = await query;
   const list = schedules || [];
 
   container.innerHTML = `
@@ -351,32 +481,8 @@ export async function renderPublicCartelera(container, slug) {
         }
       </header>
 
-      <main class="max-w-lg mx-auto p-4 space-y-3">
-        ${
-          list.length === 0
-            ? `<div class="bg-white p-8 rounded-2xl text-center text-slate-500 shadow-sm">
-                No hay salidas publicadas en este período.
-              </div>`
-            : list
-                .map(
-                  (s) => `
-                  <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-1.5">
-                    <div class="text-xs font-extrabold uppercase text-blue-900">
-                      📅 ${escapeHtml(formatDateSpanish(s.date))} • ${escapeHtml(s.time)} hs
-                    </div>
-                    <div class="font-extrabold text-slate-900 text-base">
-                      📍 ${escapeHtml(s.meeting_point_text)}
-                    </div>
-                    <div class="text-xs text-slate-600 flex flex-wrap gap-x-4 gap-y-1 pt-1">
-                      ${s.conductor_name ? `<span><b>Conductor:</b> ${escapeHtml(s.conductor_name)}</span>` : ''}
-                      ${s.groups_assigned ? `<span><b>Grupos:</b> ${escapeHtml(s.groups_assigned)}</span>` : ''}
-                      ${s.assigned_subterritories ? `<span><b>Territorios:</b> ${escapeHtml(s.assigned_subterritories)}</span>` : ''}
-                    </div>
-                  </div>
-                `
-                )
-                .join('')
-        }
+      <main class="max-w-4xl mx-auto p-4 space-y-4">
+        ${buildScheduleTableHtml(list, { adminMode: false })}
 
         <div class="pt-4 text-center">
           <a href="${window.location.pathname}" class="text-xs font-bold text-blue-900 underline">
