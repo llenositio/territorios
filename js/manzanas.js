@@ -13,6 +13,11 @@ let selectedSubterritoryId = 'ALL';
 let leafletMap = null;
 let showDnvModal = false;
 
+// Guardar encuadre actual para que el mapa no salte ni haga zoom al marcar/desmarcar
+let savedMapCenter = null;
+let savedMapZoom = null;
+let shouldFitBoundsNextRender = true;
+
 function canMarkTerritory() {
   const role = state.profile?.role;
   return isSuperadmin() || role === 'admin' || role === 'conductor';
@@ -71,6 +76,46 @@ function getFaceAgeColor(lastCompletedAt) {
   return { hex: '#10b981', badge: 'bg-emerald-100 text-emerald-800', label: 'Reciente' };
 }
 
+// Desplaza cada cara ~6m hacia el interior de su manzana para que en calles compartidas se vean las 2 veredas paralelas
+function getInsetFaceCoords(lineCoords, block) {
+  if (!Array.isArray(lineCoords) || lineCoords.length < 2 || !block) return lineCoords;
+
+  let centerLat = block.center_lat;
+  let centerLng = block.center_lng;
+  if ((!centerLat || !centerLng) && Array.isArray(block.polygon_coords) && block.polygon_coords.length >= 3) {
+    centerLat = block.polygon_coords.reduce((s, p) => s + p[0], 0) / block.polygon_coords.length;
+    centerLng = block.polygon_coords.reduce((s, p) => s + p[1], 0) / block.polygon_coords.length;
+  }
+  if (!centerLat || !centerLng) return lineCoords;
+
+  const [p1, p2] = lineCoords;
+  const midLat = (p1[0] + p2[0]) / 2;
+  const midLng = (p1[1] + p2[1]) / 2;
+
+  const toCenterLat = centerLat - midLat;
+  const toCenterLng = centerLng - midLng;
+  const dist = Math.hypot(toCenterLat, toCenterLng);
+  if (dist === 0) return lineCoords;
+
+  // ~0.000065 grados ≈ 6-7 metros hacia adentro de la vereda
+  const offsetScale = Math.min(0.000065 / dist, 0.18);
+  const dLat = toCenterLat * offsetScale;
+  const dLng = toCenterLng * offsetScale;
+
+  // También recortar un 6% en cada extremo para que no se monten en las esquinas
+  const trim = 0.06;
+  const q1 = [
+    p1[0] + (p2[0] - p1[0]) * trim + dLat,
+    p1[1] + (p2[1] - p1[1]) * trim + dLng
+  ];
+  const q2 = [
+    p2[0] - (p2[0] - p1[0]) * trim + dLat,
+    p2[1] - (p2[1] - p1[1]) * trim + dLng
+  ];
+
+  return [q1, q2];
+}
+
 export function renderManzanasView(container) {
   if (!state.userLocation) {
     requestOnDemandGps({
@@ -121,7 +166,7 @@ export function renderManzanasView(container) {
         ${
           editable
             ? `<div class="bg-blue-50 border border-blue-200 text-blue-950 px-3 py-2 rounded-xl text-[11px] font-semibold">
-                👆 <b>Modo Conductor:</b> Tocá una <b>cuadra</b> para marcar/desmarcar esa cara, o tocá el <b>centro de la manzana</b> para marcar/desmarcar las 4 caras juntas.
+                👆 <b>Modo Conductor:</b> Tocá una <b>vereda</b> para marcar/desmarcar esa cara, o tocá el <b>centro de la manzana</b> para marcar/desmarcar las 4 caras juntas.
               </div>`
             : ''
         }
@@ -208,6 +253,7 @@ export function renderManzanasView(container) {
 
   document.getElementById('filter-subterritory').onchange = (e) => {
     selectedSubterritoryId = e.target.value;
+    shouldFitBoundsNextRender = true;
     renderManzanasView(container);
   };
 
@@ -235,18 +281,28 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
   if (!mapEl || typeof window.L === 'undefined') return;
 
   if (leafletMap) {
+    savedMapCenter = leafletMap.getCenter();
+    savedMapZoom = leafletMap.getZoom();
     leafletMap.remove();
     leafletMap = null;
   }
 
-  const defaultLat = state.userLocation?.lat || -38.0055;
-  const defaultLng = state.userLocation?.lng || -57.5426;
+  const defaultLat = savedMapCenter?.lat || state.userLocation?.lat || -38.0055;
+  const defaultLng = savedMapCenter?.lng || state.userLocation?.lng || -57.5426;
+  const defaultZoom = savedMapZoom || 16;
 
-  leafletMap = window.L.map('terr-leaflet-map').setView([defaultLat, defaultLng], 15);
+  leafletMap = window.L.map('terr-leaflet-map').setView([defaultLat, defaultLng], defaultZoom);
   window.L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', {
     maxZoom: 19,
     attribution: '© OpenStreetMap'
   }).addTo(leafletMap);
+
+  leafletMap.on('moveend zoomend', () => {
+    if (leafletMap) {
+      savedMapCenter = leafletMap.getCenter();
+      savedMapZoom = leafletMap.getZoom();
+    }
+  });
 
   const bounds = [];
 
@@ -271,9 +327,9 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
     if (Array.isArray(sub.polygon_coords) && sub.polygon_coords.length >= 3) {
       window.L.polygon(sub.polygon_coords, {
         color: '#1e3a8a',
-        weight: 3,
+        weight: 2.5,
         fillColor: '#3b82f6',
-        fillOpacity: 0.05,
+        fillOpacity: 0.04,
         interactive: false
       }).addTo(leafletMap);
       sub.polygon_coords.forEach((pt) => bounds.push(pt));
@@ -288,10 +344,10 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
 
     if (Array.isArray(b.polygon_coords) && b.polygon_coords.length >= 3) {
       const poly = window.L.polygon(b.polygon_coords, {
-        color: '#334155',
+        color: '#94a3b8',
         weight: 1,
         fillColor: allDoneToday ? '#10b981' : '#94a3b8',
-        fillOpacity: allDoneToday ? 0.32 : 0.14
+        fillOpacity: allDoneToday ? 0.28 : 0.1
       }).addTo(leafletMap);
 
       if (editable) {
@@ -345,13 +401,15 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
     }
   });
 
-  // 4. Caras de manzana (toque directo en la línea marca/desmarca esa cara)
+  // 4. Caras de manzana desplazadas hacia su propia vereda (se ven 2 líneas en calles compartidas)
   faces.forEach((face) => {
     const colorInfo = getFaceAgeColor(face.last_completed_at);
+    const parentBlock = state.blocks.find((b) => b.id === face.block_id);
     if (Array.isArray(face.line_coords) && face.line_coords.length >= 2) {
-      const line = window.L.polyline(face.line_coords, {
+      const insetCoords = getInsetFaceCoords(face.line_coords, parentBlock);
+      const line = window.L.polyline(insetCoords, {
         color: colorInfo.hex,
-        weight: 8,
+        weight: 5,
         opacity: 0.95
       }).addTo(leafletMap);
 
@@ -403,12 +461,16 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
       .bindPopup('Tu ubicación actual');
   }
 
-  if (bounds.length > 0) {
+  // Solo encuadrar automáticamente la primera vez o al cambiar filtro de territorio
+  if (shouldFitBoundsNextRender && bounds.length > 0) {
     leafletMap.fitBounds(bounds, { padding: [25, 25], maxZoom: 17 });
+    savedMapCenter = leafletMap.getCenter();
+    savedMapZoom = leafletMap.getZoom();
+    shouldFitBoundsNextRender = false;
   }
 }
 
-// Alterna una cara individual: si ya está hecha hoy, la desmarca; si no, la marca hecha hoy
+// Alterna una cara individual manteniendo el encuadre del mapa
 async function toggleFaceCompleted(faceId, container) {
   const idx = state.blockFaces.findIndex((f) => f.id === faceId);
   if (idx === -1) return;
@@ -463,7 +525,7 @@ async function toggleFaceCompleted(faceId, container) {
   renderManzanasView(container);
 }
 
-// Alterna toda la manzana completa: si todas las caras están hechas hoy, desmarca todas; si no, marca todas
+// Alterna toda la manzana completa manteniendo el encuadre del mapa
 async function toggleWholeBlock(blockId, container) {
   const block = state.blocks.find((b) => b.id === blockId);
   const blockFaces = state.blockFaces.filter((f) => f.block_id === blockId);
