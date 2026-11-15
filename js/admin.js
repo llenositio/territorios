@@ -11,6 +11,7 @@ let pendingUsers = [];
 let allCongUsers = [];
 let pendingReports = [];
 let congregationsList = [];
+let hermanosCongList = [];
 let adminSubTab = 'general';
 
 // Estado del mapeador poligonal por calles
@@ -22,7 +23,7 @@ let manualClickMode = false;
 export async function loadAdminData() {
   if (!state.congregation?.id) return;
 
-  const [usersRes, repRes] = await Promise.all([
+  const [usersRes, repRes, hermRes] = await Promise.all([
     supabase
       .from('terr_users')
       .select('*')
@@ -33,7 +34,12 @@ export async function loadAdminData() {
       .select('*')
       .eq('congregation_id', state.congregation.id)
       .eq('status', 'pending')
-      .order('created_at', { ascending: false })
+      .order('created_at', { ascending: false }),
+    supabase
+      .from('hermanos')
+      .select('id, nombre, celular')
+      .eq('congregacion_id', state.congregation.id)
+      .order('nombre', { ascending: true })
   ]);
 
   if (!usersRes.error) {
@@ -43,6 +49,9 @@ export async function loadAdminData() {
   if (!repRes.error) {
     pendingReports = repRes.data || [];
   }
+  if (!hermRes.error) {
+    hermanosCongList = hermRes.data || [];
+  }
 
   if (isSuperadmin()) {
     const { data: congs } = await supabase
@@ -51,6 +60,25 @@ export async function loadAdminData() {
       .order('nombre');
     congregationsList = congs || [];
   }
+}
+
+function buildHermanosSelectOptions(selectedName) {
+  const normalizedSelected = (selectedName || '').trim().toLowerCase();
+  return `
+    <option value="">-- Vincular con planilla Hermanos --</option>
+    ${hermanosCongList
+      .map((h) => {
+        const isSelected = (h.nombre || '').trim().toLowerCase() === normalizedSelected;
+        const telInfo =
+          h.celular && !String(h.celular).toLowerCase().includes('sin tel')
+            ? ` (${h.celular})`
+            : ' (sin tel.)';
+        return `<option value="${escapeHtml(h.nombre)}" ${
+          isSelected ? 'selected' : ''
+        }>${escapeHtml(h.nombre)}${escapeHtml(telInfo)}</option>`;
+      })
+      .join('')}
+  `;
 }
 
 export function renderAdminView(container, onDataChanged) {
@@ -111,7 +139,7 @@ export function renderAdminView(container, onDataChanged) {
 
   if (adminSubTab === 'general') bindGeneralAdminEvents(container, onDataChanged, superMode);
   if (adminSubTab === 'mapa') bindPolygonMapperEvents(container, onDataChanged);
-  if (adminSubTab === 'usuarios') bindUsersAdminEvents(container);
+  if (adminSubTab === 'usuarios') bindUsersAdminEvents(container, onDataChanged);
   if (adminSubTab === 'edificios') bindBuildingsAdminEvents(container, onDataChanged);
 }
 
@@ -187,8 +215,15 @@ function renderGeneralAdminHtml(superMode) {
                     )
                     .join('')}
                 </select>
-                <input type="text" id="sa-fullname" required placeholder="Nombre completo del hermano"
-                  class="w-full px-3 py-2 rounded-xl text-slate-900 text-xs" />
+                ${
+                  hermanosCongList.length > 0
+                    ? `<select id="sa-hermano-select" required
+                        class="w-full px-3 py-2 rounded-xl text-slate-900 text-xs font-bold bg-white">
+                        ${buildHermanosSelectOptions('')}
+                      </select>`
+                    : `<input type="text" id="sa-fullname" required placeholder="Nombre completo del hermano"
+                        class="w-full px-3 py-2 rounded-xl text-slate-900 text-xs" />`
+                }
                 <div class="grid grid-cols-2 gap-2">
                   <input type="text" id="sa-username" required placeholder="Usuario (ej: juan.perez)"
                     class="w-full px-3 py-2 rounded-xl text-slate-900 text-xs" />
@@ -265,9 +300,17 @@ function bindGeneralAdminEvents(container, onDataChanged, superMode) {
     document.getElementById('create-admin-form').onsubmit = async (e) => {
       e.preventDefault();
       const congId = document.getElementById('sa-cong-select').value;
-      const fullName = document.getElementById('sa-fullname').value.trim();
+      const hermSelect = document.getElementById('sa-hermano-select');
+      const fullName = hermSelect
+        ? hermSelect.value.trim()
+        : document.getElementById('sa-fullname').value.trim();
       const username = document.getElementById('sa-username').value.trim();
       const password = document.getElementById('sa-password').value;
+
+      if (!fullName) {
+        showToast('Elegí un hermano de la planilla', 'error');
+        return;
+      }
 
       const { error } = await supabase.rpc('terr_create_admin_account', {
         p_username: username,
@@ -281,8 +324,9 @@ function bindGeneralAdminEvents(container, onDataChanged, superMode) {
         return;
       }
 
-      showToast(`Admin "${username}" creado correctamente`, 'success');
+      showToast(`Admin "${fullName}" creado correctamente`, 'success');
       document.getElementById('create-admin-form').reset();
+      if (onDataChanged) await onDataChanged();
     };
   }
 }
@@ -1028,11 +1072,15 @@ function bindPolygonMapperEvents(container, onDataChanged) {
 }
 
 // ============================================================================
-// SUBPESTAÑA 3: GESTIÓN DE USUARIOS
+// SUBPESTAÑA 3: GESTIÓN DE USUARIOS (VINCULADOS A PLANILLA HERMANOS)
 // ============================================================================
 function renderUsersAdminHtml() {
   return `
     <div class="space-y-4">
+      <div class="bg-blue-50 border border-blue-200 text-blue-950 px-3.5 py-2.5 rounded-2xl text-xs">
+        💡 Vinculá cada usuario con su registro oficial de la planilla <b>Hermanos</b> y asignale su rol (<b>Conductor</b>, <b>Admin</b> o <b>Publicador</b>) para que aparezca sin errores en <b>Salidas</b> y funcione el envío directo por WhatsApp.
+      </div>
+
       ${
         pendingUsers.length > 0
           ? `<div class="bg-amber-50 border border-amber-300 p-4 rounded-2xl space-y-2.5">
@@ -1040,20 +1088,35 @@ function renderUsersAdminHtml() {
               ${pendingUsers
                 .map(
                   (u) => `
-                  <div class="bg-white p-3 rounded-xl border border-amber-200 flex items-center justify-between gap-2">
-                    <div>
-                      <div class="font-bold text-sm text-slate-900">${escapeHtml(u.full_name || 'Sin nombre')}</div>
-                      <div class="text-xs text-slate-500">${escapeHtml(u.email)}</div>
+                  <div class="bg-white p-3.5 rounded-xl border border-amber-200 space-y-2">
+                    <div class="flex items-start justify-between gap-2">
+                      <div>
+                        <div class="font-bold text-sm text-slate-900">${escapeHtml(u.full_name || 'Sin nombre')}</div>
+                        <div class="text-xs text-slate-500">${escapeHtml(u.email)}</div>
+                      </div>
+                      <div class="flex gap-1.5 shrink-0">
+                        <button data-approve-user="${u.id}"
+                          class="approve-user-btn bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-3 py-1.5 rounded-lg text-xs">
+                          ✓ Aprobar
+                        </button>
+                        <button data-block-user="${u.id}"
+                          class="block-user-btn bg-rose-100 text-rose-700 font-bold px-2.5 py-1.5 rounded-lg text-xs">
+                          Rechazar
+                        </button>
+                      </div>
                     </div>
-                    <div class="flex gap-1.5">
-                      <button data-approve-user="${u.id}"
-                        class="approve-user-btn bg-emerald-600 text-white font-bold px-3 py-1.5 rounded-lg text-xs">
-                        Aprobar
-                      </button>
-                      <button data-block-user="${u.id}"
-                        class="block-user-btn bg-rose-100 text-rose-700 font-bold px-2.5 py-1.5 rounded-lg text-xs">
-                        Rechazar
-                      </button>
+
+                    <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 pt-1">
+                      <select id="pending-hermano-${u.id}"
+                        class="px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-bold bg-white">
+                        ${buildHermanosSelectOptions(u.full_name)}
+                      </select>
+                      <select id="pending-role-${u.id}"
+                        class="px-2.5 py-1.5 rounded-lg border border-slate-300 text-xs font-bold bg-white">
+                        <option value="publicador" ${u.role === 'publicador' ? 'selected' : ''}>Rol: Publicador</option>
+                        <option value="conductor" ${u.role === 'conductor' ? 'selected' : ''}>Rol: Conductor</option>
+                        <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Rol: Admin</option>
+                      </select>
                     </div>
                   </div>
                 `
@@ -1069,17 +1132,29 @@ function renderUsersAdminHtml() {
           .filter((u) => u.status !== 'pending')
           .map(
             (u) => `
-            <div class="flex items-center justify-between py-2 border-b border-slate-100 last:border-0 text-xs">
-              <div>
-                <div class="font-bold text-slate-900">${escapeHtml(u.full_name || u.email)}</div>
-                <div class="text-slate-400">${escapeHtml(u.email)}</div>
+            <div class="py-2.5 border-b border-slate-100 last:border-0 text-xs space-y-2">
+              <div class="flex items-center justify-between gap-2">
+                <div class="min-w-0">
+                  <div class="font-bold text-slate-900 truncate">${escapeHtml(u.full_name || u.email)}</div>
+                  <div class="text-slate-400 truncate">${escapeHtml(u.email)}</div>
+                </div>
+                <select data-role-user="${u.id}"
+                  class="change-role-select px-2.5 py-1.5 rounded-lg border border-slate-300 font-bold bg-white shrink-0">
+                  <option value="publicador" ${u.role === 'publicador' ? 'selected' : ''}>Publicador</option>
+                  <option value="conductor" ${u.role === 'conductor' ? 'selected' : ''}>Conductor</option>
+                  <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
+                </select>
               </div>
-              <select data-role-user="${u.id}"
-                class="change-role-select px-2.5 py-1.5 rounded-lg border border-slate-300 font-bold bg-white">
-                <option value="publicador" ${u.role === 'publicador' ? 'selected' : ''}>Publicador</option>
-                <option value="conductor" ${u.role === 'conductor' ? 'selected' : ''}>Conductor</option>
-                <option value="admin" ${u.role === 'admin' ? 'selected' : ''}>Admin</option>
-              </select>
+              ${
+                hermanosCongList.length > 0
+                  ? `<div>
+                      <select data-hermano-user="${u.id}"
+                        class="link-hermano-select w-full px-2.5 py-1.5 rounded-lg border border-slate-200 bg-slate-50 font-semibold text-slate-800">
+                        ${buildHermanosSelectOptions(u.full_name)}
+                      </select>
+                    </div>`
+                  : ''
+              }
             </div>
           `
           )
@@ -1089,14 +1164,41 @@ function renderUsersAdminHtml() {
   `;
 }
 
-function bindUsersAdminEvents(container) {
+function bindUsersAdminEvents(container, onDataChanged) {
   document.querySelectorAll('.approve-user-btn').forEach((btn) => {
     btn.onclick = async () => {
       const id = btn.getAttribute('data-approve-user');
-      await supabase.from('terr_users').update({ status: 'approved' }).eq('id', id);
-      showToast('Hermano aprobado', 'success');
+      const hermanoSel = document.getElementById(`pending-hermano-${id}`);
+      const roleSel = document.getElementById(`pending-role-${id}`);
+      const chosenName = hermanoSel ? hermanoSel.value.trim() : '';
+      const chosenRole = roleSel ? roleSel.value : 'publicador';
+
+      if (hermanosCongList.length > 0 && !chosenName) {
+        showToast('Elegí primero el nombre desde la planilla Hermanos', 'error');
+        return;
+      }
+
+      const updatePayload = {
+        status: 'approved',
+        role: chosenRole
+      };
+      if (chosenName) {
+        updatePayload.full_name = chosenName;
+      }
+
+      const { error } = await supabase
+        .from('terr_users')
+        .update(updatePayload)
+        .eq('id', id);
+
+      if (error) {
+        showToast('Error al aprobar: ' + error.message, 'error');
+        return;
+      }
+
+      showToast('Hermano aprobado y vinculado', 'success');
       await loadAdminData();
-      renderAdminView(container);
+      renderAdminView(container, onDataChanged);
     };
   });
 
@@ -1106,15 +1208,45 @@ function bindUsersAdminEvents(container) {
       await supabase.from('terr_users').update({ status: 'blocked' }).eq('id', id);
       showToast('Solicitud rechazada', 'info');
       await loadAdminData();
-      renderAdminView(container);
+      renderAdminView(container, onDataChanged);
     };
   });
 
   document.querySelectorAll('.change-role-select').forEach((sel) => {
     sel.onchange = async () => {
       const id = sel.getAttribute('data-role-user');
-      await supabase.from('terr_users').update({ role: sel.value }).eq('id', id);
+      const { error } = await supabase
+        .from('terr_users')
+        .update({ role: sel.value })
+        .eq('id', id);
+      if (error) {
+        showToast('Error al actualizar rol: ' + error.message, 'error');
+        return;
+      }
       showToast('Rol actualizado', 'success');
+      if (onDataChanged) await onDataChanged();
+    };
+  });
+
+  document.querySelectorAll('.link-hermano-select').forEach((sel) => {
+    sel.onchange = async () => {
+      const id = sel.getAttribute('data-hermano-user');
+      const chosenName = sel.value.trim();
+      if (!chosenName) return;
+
+      const { error } = await supabase
+        .from('terr_users')
+        .update({ full_name: chosenName })
+        .eq('id', id);
+
+      if (error) {
+        showToast('Error al vincular hermano: ' + error.message, 'error');
+        return;
+      }
+
+      showToast(`Vinculado con ${chosenName}`, 'success');
+      await loadAdminData();
+      renderAdminView(container, onDataChanged);
     };
   });
 }
