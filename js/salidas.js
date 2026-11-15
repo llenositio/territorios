@@ -69,6 +69,34 @@ function normalizeName(str) {
     .trim();
 }
 
+function formatearNumeroWhatsApp(telefonoRaw) {
+  if (!telefonoRaw) return null;
+  const strRaw = String(telefonoRaw).trim();
+  if (!strRaw || strRaw.toLowerCase().includes('sin tel')) return null;
+
+  let num = strRaw.replace(/\D/g, '');
+  if (!num || num.length < 8) return null;
+
+  // Si ya empieza con 549 y tiene la longitud internacional correcta (12 a 13 dígitos)
+  if (num.startsWith('549') && num.length >= 12) {
+    return num;
+  }
+  // Si empieza con 54 pero le falta el 9 (ej: 542235000000)
+  if (num.startsWith('54') && !num.startsWith('549')) {
+    return '549' + num.substring(2);
+  }
+  // Si empieza con 0 (ej: 02235000000)
+  if (num.startsWith('0')) {
+    num = num.substring(1);
+  }
+  // Si tiene 10 dígitos (ej: 2235000000)
+  if (num.length === 10) {
+    return '549' + num;
+  }
+
+  return num.length >= 10 ? '549' + num : num;
+}
+
 function findConductorPhone(conductorName) {
   if (!conductorName) return null;
   const target = normalizeName(conductorName);
@@ -85,15 +113,15 @@ function findConductorPhone(conductorName) {
   }
 
   if (!match || !match.celular) return null;
-  const digits = String(match.celular).replace(/\D/g, '');
-  if (!digits || digits.length < 8) return null;
+  return formatearNumeroWhatsApp(match.celular);
+}
 
-  // Normalizar formato internacional WhatsApp Argentina (549 + 10 dígitos)
-  if (digits.startsWith('549') && digits.length >= 12) return digits;
-  if (digits.startsWith('54') && digits.length === 12) return '549' + digits.slice(2);
-  if (digits.startsWith('0')) return '549' + digits.slice(1);
-  if (digits.length === 10) return '549' + digits;
-  return digits;
+function getWhatsAppSvgIcon() {
+  return `
+    <svg viewBox="0 0 32 32" class="w-5 h-5 fill-current" aria-hidden="true">
+      <path d="M16.004 3.2c-7.06 0-12.8 5.74-12.8 12.8 0 2.256.59 4.46 1.71 6.402L3.1 28.8l6.564-1.722a12.74 12.74 0 0 0 6.34 1.682h.006c7.058 0 12.798-5.74 12.798-12.8 0-3.42-1.332-6.634-3.75-9.052A12.714 12.714 0 0 0 16.004 3.2zm0 23.394h-.004a10.58 10.58 0 0 1-5.394-1.478l-.388-.23-3.896 1.022 1.04-3.798-.252-.402a10.556 10.556 0 0 1-1.622-5.648c0-5.842 4.754-10.596 10.602-10.596 2.83 0 5.49 1.104 7.49 3.106a10.526 10.526 0 0 1 3.102 7.494c0 5.844-4.756 10.53-10.688 10.53zm5.816-7.938c-.318-.16-1.884-.93-2.176-1.036-.292-.106-.504-.16-.716.16-.212.318-.822 1.036-1.008 1.248-.186.212-.372.238-.69.08-.318-.16-1.344-.496-2.56-1.58-.946-.844-1.584-1.886-1.77-2.204-.186-.318-.02-.49.14-.648.144-.142.318-.372.478-.558.16-.186.212-.318.318-.53.106-.212.054-.398-.026-.558-.08-.16-.716-1.726-.982-2.364-.258-.62-.52-.536-.716-.546l-.61-.01c-.212 0-.558.08-.85.398-.292.318-1.114 1.088-1.114 2.654 0 1.566 1.14 3.078 1.3 3.29.16.212 2.244 3.426 5.436 4.804.76.328 1.352.524 1.814.67.762.242 1.456.208 2.004.126.612-.092 1.884-.77 2.15-1.514.266-.744.266-1.38.186-1.514-.08-.132-.292-.212-.61-.372z"/>
+    </svg>
+  `;
 }
 
 function buildScheduleTableHtml(list, { adminMode = false } = {}) {
@@ -105,17 +133,17 @@ function buildScheduleTableHtml(list, { adminMode = false } = {}) {
   }
 
   return `
-    <div class="bg-white rounded-2xl shadow-sm border border-slate-300 overflow-hidden">
-      <div class="overflow-x-auto">
+    <div class="w-full bg-white rounded-2xl shadow-sm border border-slate-300 overflow-hidden">
+      <div class="overflow-x-auto w-full">
         <table class="w-full border-collapse text-center text-xs sm:text-[13px]">
           <thead>
             <tr class="bg-[#2b6cb0] text-white font-extrabold tracking-wide uppercase">
-              <th class="py-2.5 px-2.5 border border-[#1e4e8c]">DÍA</th>
+              <th class="py-2.5 px-2 border border-[#1e4e8c]">DÍA</th>
               <th class="py-2.5 px-2 border border-[#1e4e8c]">HORA</th>
-              <th class="py-2.5 px-3 border border-[#1e4e8c]">LUGAR</th>
-              <th class="py-2.5 px-2.5 border border-[#1e4e8c]">GRUPOS</th>
-              <th class="py-2.5 px-3 border border-[#1e4e8c]">CONDUCTOR</th>
-              <th class="py-2.5 px-2.5 border border-[#1e4e8c]">TERRITORIO</th>
+              <th class="py-2.5 px-2.5 border border-[#1e4e8c]">LUGAR</th>
+              <th class="py-2.5 px-2 border border-[#1e4e8c]">GRUPOS</th>
+              <th class="py-2.5 px-2.5 border border-[#1e4e8c]">CONDUCTOR</th>
+              <th class="py-2.5 px-2 border border-[#1e4e8c]">TERRITORIO</th>
               ${adminMode ? `<th class="py-2.5 px-2 border border-[#1e4e8c]">ACCIÓN</th>` : ''}
             </tr>
           </thead>
@@ -132,35 +160,35 @@ function buildScheduleTableHtml(list, { adminMode = false } = {}) {
 
                 return `
                   <tr class="${rowBg} text-slate-900">
-                    <td class="py-2.5 px-2.5 border border-slate-300 font-extrabold whitespace-nowrap">
+                    <td class="py-2.5 px-2 border border-slate-300 font-extrabold whitespace-nowrap">
                       ${escapeHtml(dayLabel)}
                     </td>
                     <td class="py-2.5 px-2 border border-slate-300 font-extrabold whitespace-nowrap">
                       ${escapeHtml(timeLabel)}
                     </td>
-                    <td class="py-2.5 px-3 border border-slate-300 font-semibold">
+                    <td class="py-2.5 px-2.5 border border-slate-300 font-semibold leading-snug">
                       ${escapeHtml(placeLabel)}
                     </td>
-                    <td class="py-2.5 px-2.5 border border-slate-300 font-semibold whitespace-nowrap">
+                    <td class="py-2.5 px-2 border border-slate-300 font-semibold">
                       ${escapeHtml(groupsLabel)}
                     </td>
-                    <td class="py-2.5 px-3 border border-slate-300 font-semibold whitespace-nowrap">
+                    <td class="py-2.5 px-2.5 border border-slate-300 font-semibold">
                       ${escapeHtml(conductorLabel)}
                     </td>
-                    <td class="py-2.5 px-2.5 border border-slate-300 font-extrabold whitespace-nowrap">
+                    <td class="py-2.5 px-2 border border-slate-300 font-extrabold">
                       ${escapeHtml(terrLabel)}
                     </td>
                     ${
                       adminMode
                         ? `<td class="py-2 px-2 border border-slate-300 whitespace-nowrap">
-                            <div class="inline-flex items-center gap-1">
+                            <div class="inline-flex items-center justify-center gap-1.5">
                               <button data-sched-id="${s.id}"
-                                class="send-wa-btn bg-emerald-600 hover:bg-emerald-500 text-white font-bold px-2 py-1 rounded text-[11px]"
+                                class="send-wa-btn inline-flex items-center justify-center w-8 h-8 rounded-full border-2 border-[#25D366] text-[#128C7E] bg-white hover:bg-[#25D366] hover:text-white transition shadow-xs"
                                 title="Enviar WhatsApp al conductor">
-                                📲
+                                ${getWhatsAppSvgIcon()}
                               </button>
                               <button data-del-sched="${s.id}"
-                                class="del-sched-btn bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold px-2 py-1 rounded text-[11px]"
+                                class="del-sched-btn inline-flex items-center justify-center w-8 h-8 rounded-lg bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold text-xs transition"
                                 title="Eliminar fila">
                                 🗑️
                               </button>
@@ -185,7 +213,7 @@ export function renderSalidasView(container) {
   const publicUrl = `${window.location.origin}${window.location.pathname}#/salidas/${publicSlug}`;
 
   container.innerHTML = `
-    <div class="space-y-4 pb-24 max-w-4xl mx-auto">
+    <div class="space-y-4 pb-24 w-full">
       ${
         adminMode
           ? `<div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
@@ -256,7 +284,9 @@ export function renderSalidasView(container) {
         `⏰ *Hora:* ${formatTimeShort(item.time)} hs`,
         `📍 *Lugar:* ${item.meeting_point_text}`,
         item.groups_assigned ? `👥 *Grupos:* ${item.groups_assigned}` : null,
-        item.assigned_subterritories ? `🗺️ *Territorios:* ${item.assigned_subterritories}` : null
+        item.assigned_subterritories ? `🗺️ *Territorios:* ${item.assigned_subterritories}` : null,
+        ``,
+        `Por favor, mandame un OK como respuesta`
       ]
         .filter((line) => line !== null)
         .join('\n');
@@ -481,7 +511,7 @@ export async function renderPublicCartelera(container, slug) {
         }
       </header>
 
-      <main class="max-w-4xl mx-auto p-4 space-y-4">
+      <main class="max-w-5xl mx-auto p-4 space-y-4">
         ${buildScheduleTableHtml(list, { adminMode: false })}
 
         <div class="pt-4 text-center">
