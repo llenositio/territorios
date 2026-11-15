@@ -4,11 +4,12 @@ import { showToast, escapeHtml } from './ui-helpers.js';
 
 let showNewScheduleModal = false;
 let hermanosList = [];
+let conductoresList = [];
 
 export async function loadSchedulesAndPoints() {
   if (!state.congregation?.id) return;
 
-  const [schedRes, mpRes, hermRes] = await Promise.all([
+  const [schedRes, mpRes, hermRes, usersRes] = await Promise.all([
     supabase
       .from('terr_schedules')
       .select('*')
@@ -25,12 +26,42 @@ export async function loadSchedulesAndPoints() {
       .from('hermanos')
       .select('id, nombre, celular')
       .eq('congregacion_id', state.congregation.id)
-      .order('nombre', { ascending: true })
+      .order('nombre', { ascending: true }),
+    supabase
+      .from('terr_users')
+      .select('id, full_name, role, status')
+      .eq('congregation_id', state.congregation.id)
+      .eq('status', 'approved')
+      .in('role', ['conductor', 'admin'])
   ]);
 
   if (!schedRes.error) state.schedules = schedRes.data || [];
   if (!mpRes.error) state.meetingPoints = mpRes.data || [];
   if (!hermRes.error) hermanosList = hermRes.data || [];
+
+  if (!usersRes.error) {
+    const approvedUsers = usersRes.data || [];
+    const seen = new Set();
+    conductoresList = [];
+
+    for (const u of approvedUsers) {
+      const rawName = (u.full_name || '').trim();
+      if (!rawName) continue;
+      const hermMatch = findHermanoRecord(rawName);
+      const officialName = hermMatch ? hermMatch.nombre : rawName;
+      const key = normalizeName(officialName);
+      if (seen.has(key)) continue;
+      seen.add(key);
+
+      conductoresList.push({
+        nombre: officialName,
+        celular: hermMatch?.celular || null,
+        role: u.role
+      });
+    }
+
+    conductoresList.sort((a, b) => a.nombre.localeCompare(b.nombre, 'es'));
+  }
 }
 
 function getDayNameUpper(isoDate) {
@@ -65,6 +96,7 @@ function normalizeName(str) {
     .toLowerCase()
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[,.\-_]/g, ' ')
     .replace(/\s+/g, ' ')
     .trim();
 }
@@ -97,21 +129,36 @@ function formatearNumeroWhatsApp(telefonoRaw) {
   return num.length >= 10 ? '549' + num : num;
 }
 
-function findConductorPhone(conductorName) {
+function findHermanoRecord(conductorName) {
   if (!conductorName) return null;
   const target = normalizeName(conductorName);
   if (!target) return null;
 
-  // Coincidencia exacta primero, luego coincidencia parcial
+  // 1. Coincidencia exacta normalizada
   let match = hermanosList.find((h) => normalizeName(h.nombre) === target);
-  if (!match) {
-    match = hermanosList.find(
-      (h) =>
-        normalizeName(h.nombre).includes(target) ||
-        target.includes(normalizeName(h.nombre))
-    );
+  if (match) return match;
+
+  // 2. Coincidencia por tokens (ej: "CLAUDIO LLENOLIO" <-> "LLENOLIO, Claudio")
+  const targetTokens = target.split(' ').filter((t) => t.length >= 2);
+  if (targetTokens.length >= 2) {
+    match = hermanosList.find((h) => {
+      const hTokens = normalizeName(h.nombre).split(' ');
+      return targetTokens.every((tk) => hTokens.includes(tk));
+    });
+    if (match) return match;
   }
 
+  // 3. Coincidencia parcial por inclusión
+  match = hermanosList.find(
+    (h) =>
+      normalizeName(h.nombre).includes(target) ||
+      target.includes(normalizeName(h.nombre))
+  );
+  return match || null;
+}
+
+function findConductorPhone(conductorName) {
+  const match = findHermanoRecord(conductorName);
   if (!match || !match.celular) return null;
   return formatearNumeroWhatsApp(match.celular);
 }
@@ -313,6 +360,8 @@ export function renderSalidasView(container) {
 }
 
 function renderNewScheduleModalHtml() {
+  const sourceList = conductoresList.length > 0 ? conductoresList : hermanosList;
+
   return `
     <div class="fixed inset-0 z-50 bg-slate-950/70 flex items-center justify-center p-4 overflow-y-auto">
       <div class="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl space-y-3 my-6">
@@ -358,23 +407,27 @@ function renderNewScheduleModalHtml() {
 
           <div>
             <label class="block text-xs font-bold text-slate-700 mb-1">Conductor</label>
+            <select id="sched-conductor-select"
+              class="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-sm font-semibold bg-white">
+              <option value="">-- Sin conductor asignado --</option>
+              ${sourceList
+                .map((h) => {
+                  const hasPhone =
+                    h.celular && !String(h.celular).toLowerCase().includes('sin tel');
+                  const phoneTag = hasPhone ? ` · 📱 ${h.celular}` : ' · sin tel.';
+                  return `<option value="${escapeHtml(h.nombre)}">${escapeHtml(h.nombre)}${escapeHtml(
+                    phoneTag
+                  )}</option>`;
+                })
+                .join('')}
+            </select>
             ${
-              hermanosList.length > 0
-                ? `<select id="sched-conductor-select" class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm bg-white mb-1.5">
-                    <option value="">-- Elegir de la lista o escribir abajo --</option>
-                    ${hermanosList
-                      .map(
-                        (h) =>
-                          `<option value="${escapeHtml(h.nombre)}">${escapeHtml(h.nombre)}${
-                            h.celular && h.celular !== 'Sin teléfono' ? ` (${escapeHtml(h.celular)})` : ''
-                          }</option>`
-                      )
-                      .join('')}
-                  </select>`
+              conductoresList.length === 0
+                ? `<p class="text-[11px] text-amber-700 mt-1">
+                    Sugerencia: asigná el rol <b>Conductor</b> en <b>Admin → Usuarios</b> para filtrar solo conductores habilitados.
+                  </p>`
                 : ''
             }
-            <input type="text" id="sched-conductor" placeholder="Nombre del conductor (opcional)"
-              class="w-full px-3 py-2 rounded-xl border border-slate-300 text-sm" />
           </div>
 
           <div class="grid grid-cols-2 gap-2">
@@ -420,23 +473,16 @@ function bindNewScheduleModalEvents(container) {
     };
   }
 
-  const condSelect = document.getElementById('sched-conductor-select');
-  if (condSelect) {
-    condSelect.onchange = () => {
-      if (condSelect.value) {
-        document.getElementById('sched-conductor').value = condSelect.value;
-      }
-    };
-  }
-
   document.getElementById('new-schedule-form').onsubmit = async (e) => {
     e.preventDefault();
+    const selectedConductor = document.getElementById('sched-conductor-select')?.value.trim() || null;
+
     const payload = {
       congregation_id: state.congregation.id,
       date: document.getElementById('sched-date').value,
       time: document.getElementById('sched-time').value,
       meeting_point_text: document.getElementById('sched-mp-text').value.trim(),
-      conductor_name: document.getElementById('sched-conductor').value.trim() || null,
+      conductor_name: selectedConductor,
       groups_assigned: document.getElementById('sched-groups').value.trim() || null,
       assigned_subterritories: document.getElementById('sched-terrs').value.trim() || null,
       is_special_event: document.getElementById('sched-special').checked
