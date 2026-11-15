@@ -109,19 +109,15 @@ function formatearNumeroWhatsApp(telefonoRaw) {
   let num = strRaw.replace(/\D/g, '');
   if (!num || num.length < 8) return null;
 
-  // Si ya empieza con 549 y tiene la longitud internacional correcta (12 a 13 dígitos)
   if (num.startsWith('549') && num.length >= 12) {
     return num;
   }
-  // Si empieza con 54 pero le falta el 9 (ej: 542235000000)
   if (num.startsWith('54') && !num.startsWith('549')) {
     return '549' + num.substring(2);
   }
-  // Si empieza con 0 (ej: 02235000000)
   if (num.startsWith('0')) {
     num = num.substring(1);
   }
-  // Si tiene 10 dígitos (ej: 2235000000)
   if (num.length === 10) {
     return '549' + num;
   }
@@ -237,7 +233,7 @@ function buildScheduleTableHtml(list, { adminMode = false } = {}) {
                               <button data-del-sched="${s.id}"
                                 class="del-sched-btn inline-flex items-center justify-center w-8 h-8 rounded-lg bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold text-xs transition"
                                 title="Eliminar fila">
-                                🗑️
+                                \u{1F5D1}\uFE0F
                               </button>
                             </div>
                           </td>`
@@ -272,7 +268,7 @@ export function renderSalidasView(container) {
                 <button id="btn-copy-public-link"
                   class="bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold py-3 px-3.5 rounded-xl text-xs border border-slate-200 transition"
                   title="Copiar enlace público de cartelera">
-                  🔗 Link Público
+                  \u{1F517} Link Público
                 </button>
               </div>
               <div class="text-[11px] text-slate-500">
@@ -322,16 +318,25 @@ export function renderSalidasView(container) {
       if (!item) return;
 
       const phone = findConductorPhone(item.conductor_name);
-      const saludo = item.conductor_name ? `Hola ${item.conductor_name}, ` : 'Hola, ';
+
+      // Convierte "LLENOLIO, Mónica" en "Mónica Llenolio" para un saludo natural
+      let displayName = (item.conductor_name || '').trim();
+      if (displayName.includes(',')) {
+        const [apellido, nombre] = displayName.split(',').map((s) => s.trim());
+        const apellidoCap =
+          apellido.charAt(0).toUpperCase() + apellido.slice(1).toLowerCase();
+        displayName = `${nombre} ${apellidoCap}`.trim();
+      }
+      const saludo = displayName ? `Hola ${displayName}, ` : 'Hola, ';
 
       const text = [
         `${saludo}te paso los datos de la salida al servicio que tenés asignada:`,
         ``,
-        `📅 *Día:* ${formatDateSpanish(item.date)}`,
-        `⏰ *Hora:* ${formatTimeShort(item.time)} hs`,
-        `📍 *Lugar:* ${item.meeting_point_text}`,
-        item.groups_assigned ? `👥 *Grupos:* ${item.groups_assigned}` : null,
-        item.assigned_subterritories ? `🗺️ *Territorios:* ${item.assigned_subterritories}` : null,
+        `\u{1F4C5} *Día:* ${formatDateSpanish(item.date)}`,
+        `\u23F0 *Hora:* ${formatTimeShort(item.time)} hs`,
+        `\u{1F4CD} *Lugar:* ${item.meeting_point_text}`,
+        item.groups_assigned ? `\u{1F465} *Grupos:* ${item.groups_assigned}` : null,
+        item.assigned_subterritories ? `\u{1F5FA}\uFE0F *Territorios:* ${item.assigned_subterritories}` : null,
         ``,
         `Por favor, mandame un OK como respuesta`
       ]
@@ -367,7 +372,7 @@ function renderNewScheduleModalHtml() {
       <div class="bg-white w-full max-w-sm rounded-3xl p-6 shadow-2xl space-y-3 my-6">
         <div class="flex items-center justify-between">
           <h3 class="text-lg font-extrabold text-slate-900">Nueva Salida</h3>
-          <button id="close-sched-modal" class="text-slate-400 hover:text-slate-700 text-xl font-bold">✕</button>
+          <button id="close-sched-modal" class="text-slate-400 hover:text-slate-700 text-xl font-bold">\u2715</button>
         </div>
 
         <form id="new-schedule-form" class="space-y-3">
@@ -414,7 +419,7 @@ function renderNewScheduleModalHtml() {
                 .map((h) => {
                   const hasPhone =
                     h.celular && !String(h.celular).toLowerCase().includes('sin tel');
-                  const phoneTag = hasPhone ? ` · 📱 ${h.celular}` : ' · sin tel.';
+                  const phoneTag = hasPhone ? ` · \u{1F4F1} ${h.celular}` : ' · sin tel.';
                   return `<option value="${escapeHtml(h.nombre)}">${escapeHtml(h.nombre)}${escapeHtml(
                     phoneTag
                   )}</option>`;
@@ -424,7 +429,7 @@ function renderNewScheduleModalHtml() {
             ${
               conductoresList.length === 0
                 ? `<p class="text-[11px] text-amber-700 mt-1">
-                    Sugerencia: asigná el rol <b>Conductor</b> en <b>Admin → Usuarios</b> para filtrar solo conductores habilitados.
+                    Sugerencia: asigná el rol <b>Conductor</b> en <b>Admin \u2192 Usuarios</b> para filtrar solo conductores habilitados.
                   </p>`
                 : ''
             }
@@ -562,7 +567,7 @@ export async function renderPublicCartelera(container, slug) {
 
         <div class="pt-4 text-center">
           <a href="${window.location.pathname}" class="text-xs font-bold text-blue-900 underline">
-            Ingresar a la app de Territorios →
+            Ingresar a la app de Territorios \u2192
           </a>
         </div>
       </main>
