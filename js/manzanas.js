@@ -254,7 +254,7 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
   if (selectedSubterritoryId === 'ALL') {
     state.territories.forEach((t) => {
       if (Array.isArray(t.polygon_coords) && t.polygon_coords.length >= 3) {
-        const poly = window.L.polygon(t.polygon_coords, {
+        window.L.polygon(t.polygon_coords, {
           color: '#475569',
           weight: 2,
           dashArray: '6, 6',
@@ -303,7 +303,6 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
         poly.bindPopup(`<b>Manzana ${escapeHtml(b.name)}</b>`);
       }
 
-      // Etiqueta central con la letra de la manzana
       const centerLat =
         b.center_lat ||
         b.polygon_coords.reduce((acc, p) => acc + p[0], 0) / b.polygon_coords.length;
