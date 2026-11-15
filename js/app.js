@@ -189,10 +189,10 @@ function renderMainShell() {
         </button>
       </header>
 
-      <main id="tab-content" class="flex-1 max-w-xl w-full mx-auto p-4"></main>
+      <main id="tab-content" class="flex-1 max-w-5xl w-full mx-auto px-2 py-3 sm:p-4"></main>
 
       <nav class="fixed bottom-0 inset-x-0 bg-white border-t border-slate-200 z-30 shadow-lg print:hidden">
-        <div class="max-w-xl mx-auto grid grid-cols-${tabs.length}">
+        <div class="max-w-5xl mx-auto grid grid-cols-${tabs.length}">
           ${tabs
             .map(
               (t) => `
