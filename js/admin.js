@@ -14,11 +14,12 @@ let congregationsList = [];
 let hermanosCongList = [];
 let adminSubTab = 'general';
 
-// Estado del mapeador poligonal por calles
+// Estado del mapeador poligonal por calles (creación y edición)
 let polyPreviewCoords = [];
 let polyStreetNames = [];
 let polyPreviewMap = null;
 let manualClickMode = false;
+let editingPolygonState = null; // { type: 'territory'|'subterritory'|'block', id, name, parentTerritoryId, parentSubterritoryId }
 
 export async function loadAdminData() {
   if (!state.congregation?.id) return;
@@ -332,10 +333,14 @@ function bindGeneralAdminEvents(container, onDataChanged, superMode) {
 }
 
 // ============================================================================
-// SUBPESTAÑA 2: MAPEADOR POR CALLES Y REINICIO DE PREDICACIÓN
+// SUBPESTAÑA 2: MAPEADOR POR CALLES, EDICIÓN Y REINICIO DE PREDICACIÓN
 // ============================================================================
 function renderPolygonMapperHtml() {
   const city = state.settings?.city || 'Mar del Plata';
+  const activeType = editingPolygonState?.type || 'subterritory';
+  const activeName = editingPolygonState?.name || '';
+  const activeParentTerr = editingPolygonState?.parentTerritoryId || '';
+  const activeParentSub = editingPolygonState?.parentSubterritoryId || '';
 
   return `
     <div class="space-y-4">
@@ -412,26 +417,55 @@ function renderPolygonMapperHtml() {
         </div>
       </div>
 
-      <!-- MAPEADOR POR CALLES PERIMETRALES -->
-      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
-        <div>
-          <h3 class="text-base font-extrabold text-slate-900">🗺️ Mapear por Calles Perimetrales</h3>
-          <p class="text-xs text-slate-500 mt-0.5">
-            Ingresá las calles en orden alrededor del perímetro (3, 4, 8 o las que formen el polígono).
-            El sistema detectará las intersecciones en <b>${escapeHtml(city)}</b>.
-          </p>
+      <!-- MAPEADOR / EDITOR POR CALLES PERIMETRALES -->
+      <div id="poly-mapper-card" class="bg-white p-4 rounded-2xl shadow-sm border ${
+        editingPolygonState ? 'border-amber-400 ring-2 ring-amber-200' : 'border-slate-200'
+      } space-y-3">
+        <div class="flex items-start justify-between gap-2">
+          <div>
+            <h3 class="text-base font-extrabold text-slate-900">
+              ${
+                editingPolygonState
+                  ? `✎ Editando: ${escapeHtml(editingPolygonState.name)}`
+                  : '🗺️ Mapear por Calles Perimetrales'
+              }
+            </h3>
+            <p class="text-xs text-slate-500 mt-0.5">
+              ${
+                editingPolygonState
+                  ? 'Modificá el nombre, arrastrá los vértices en el mapa o recalculá las calles y guardá.'
+                  : `Ingresá las calles en orden alrededor del perímetro. El sistema detectará las intersecciones en <b>${escapeHtml(
+                      city
+                    )}</b>.`
+              }
+            </p>
+          </div>
+          ${
+            editingPolygonState
+              ? `<button type="button" id="btn-cancel-edit-polygon"
+                  class="bg-slate-200 hover:bg-slate-300 text-slate-800 font-bold px-2.5 py-1.5 rounded-xl text-xs shrink-0">
+                  Cancelar
+                </button>`
+              : ''
+          }
         </div>
 
         <div class="space-y-2.5">
           <div>
             <label class="block text-xs font-bold text-slate-700 mb-1">¿Qué querés mapear?</label>
-            <select id="poly-entity-type"
-              class="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-xs font-bold bg-white">
-              <option value="territory">Territorio asignado a la congregación (${escapeHtml(
+            <select id="poly-entity-type" ${editingPolygonState ? 'disabled' : ''}
+              class="w-full px-3 py-2.5 rounded-xl border border-slate-300 text-xs font-bold bg-white disabled:bg-slate-100">
+              <option value="territory" ${
+                activeType === 'territory' ? 'selected' : ''
+              }>Territorio asignado a la congregación (${escapeHtml(
                 state.congregation?.nombre || ''
               )})</option>
-              <option value="subterritory" selected>Territorios (numerados, ej: 26)</option>
-              <option value="block">Manzana (con letra, ej: A, B, E)</option>
+              <option value="subterritory" ${
+                activeType === 'subterritory' ? 'selected' : ''
+              }>Territorios (numerados, ej: 26)</option>
+              <option value="block" ${
+                activeType === 'block' ? 'selected' : ''
+              }>Manzana (con letra, ej: A, B, E)</option>
             </select>
           </div>
 
@@ -443,7 +477,12 @@ function renderPolygonMapperHtml() {
               class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white">
               <option value="">-- Ninguno / Independiente --</option>
               ${state.territories
-                .map((t) => `<option value="${t.id}">${escapeHtml(t.code_or_name)}</option>`)
+                .map(
+                  (t) =>
+                    `<option value="${t.id}" ${
+                      t.id === activeParentTerr ? 'selected' : ''
+                    }>${escapeHtml(t.code_or_name)}</option>`
+                )
                 .join('')}
             </select>
           </div>
@@ -454,7 +493,12 @@ function renderPolygonMapperHtml() {
               class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white">
               <option value="">-- Elegir Territorio --</option>
               ${state.subterritories
-                .map((s) => `<option value="${s.id}">Territorio ${escapeHtml(s.code)}</option>`)
+                .map(
+                  (s) =>
+                    `<option value="${s.id}" ${
+                      s.id === activeParentSub ? 'selected' : ''
+                    }>Territorio ${escapeHtml(s.code)}</option>`
+                )
                 .join('')}
             </select>
           </div>
@@ -464,7 +508,7 @@ function renderPolygonMapperHtml() {
               <label id="poly-name-label" class="block text-xs font-bold text-slate-700 mb-1">
                 Número de Territorio (ej: 26)
               </label>
-              <input type="text" id="poly-entity-name" placeholder="Ej: 26"
+              <input type="text" id="poly-entity-name" value="${escapeHtml(activeName)}" placeholder="Ej: 26"
                 class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs font-bold" />
             </div>
             <div>
@@ -520,20 +564,118 @@ function renderPolygonMapperHtml() {
           </div>
           <div id="admin-poly-map" class="w-full h-[500px] rounded-xl border border-slate-300 z-10 transition-all"></div>
           <button type="button" id="btn-save-polygon"
-            class="w-full bg-emerald-600 hover:bg-emerald-500 text-white font-extrabold py-3 rounded-xl text-sm shadow">
-            💾 Guardar en la Congregación
+            class="w-full ${
+              editingPolygonState ? 'bg-amber-600 hover:bg-amber-500' : 'bg-emerald-600 hover:bg-emerald-500'
+            } text-white font-extrabold py-3 rounded-xl text-sm shadow">
+            ${editingPolygonState ? '💾 Actualizar Cambios' : '💾 Guardar en la Congregación'}
           </button>
         </div>
       </div>
 
-      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-2">
+      <!-- LISTADO EDITABLE DE LO CARGADO EN LA CONGREGACIÓN -->
+      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
         <h4 class="text-xs font-extrabold uppercase text-slate-500">
-          Cargado en la Congregación
+          Cargado en la Congregación (Tocá ✎ para editar)
         </h4>
-        <div class="text-xs text-slate-600 space-y-1">
-          <div>• <b>Territorio asignado a la congregación:</b> ${state.territories.length}</div>
-          <div>• <b>Territorios:</b> ${state.subterritories.length}</div>
-          <div>• <b>Manzanas:</b> ${state.blocks.length} (${state.blockFaces.length} cuadras)</div>
+
+        <!-- Territorio asignado a la congregación -->
+        <div class="space-y-1.5">
+          <div class="text-xs font-extrabold text-slate-800">
+            • Territorio asignado a la congregación (${state.territories.length})
+          </div>
+          ${state.territories
+            .map(
+              (t) => `
+              <div class="flex items-center justify-between bg-slate-50 px-3 py-2 rounded-xl border border-slate-200 text-xs">
+                <span class="font-bold text-slate-900">${escapeHtml(t.code_or_name)}</span>
+                <div class="flex items-center gap-1.5">
+                  <button type="button" data-edit-poly-type="territory" data-edit-poly-id="${t.id}"
+                    class="edit-poly-btn bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold px-2.5 py-1 rounded-lg text-xs"
+                    title="Editar territorio asignado">
+                    ✎ Editar
+                  </button>
+                  <button type="button" data-del-poly-type="territory" data-del-poly-id="${t.id}"
+                    class="del-poly-btn bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold px-2 py-1 rounded-lg text-xs"
+                    title="Eliminar">
+                    ✕
+                  </button>
+                </div>
+              </div>
+            `
+            )
+            .join('')}
+        </div>
+
+        <!-- Territorios (subterritories) -->
+        <div class="space-y-1.5 pt-2 border-t border-slate-100">
+          <div class="text-xs font-extrabold text-slate-800">
+            • Territorios (${state.subterritories.length})
+          </div>
+          ${state.subterritories
+            .map((s) => {
+              const blkCount = state.blocks.filter((b) => b.subterritory_id === s.id).length;
+              return `
+                <div class="flex items-center justify-between bg-slate-50 px-3 py-2 rounded-xl border border-slate-200 text-xs">
+                  <div>
+                    <span class="font-bold text-slate-900">Territorio ${escapeHtml(s.code)}</span>
+                    <span class="text-slate-500 ml-1">(${blkCount} manzanas)</span>
+                  </div>
+                  <div class="flex items-center gap-1.5">
+                    <button type="button" data-edit-poly-type="subterritory" data-edit-poly-id="${s.id}"
+                      class="edit-poly-btn bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold px-2.5 py-1 rounded-lg text-xs"
+                      title="Editar territorio">
+                      ✎ Editar
+                    </button>
+                    <button type="button" data-del-poly-type="subterritory" data-del-poly-id="${s.id}"
+                      class="del-poly-btn bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold px-2 py-1 rounded-lg text-xs"
+                      title="Eliminar">
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              `;
+            })
+            .join('')}
+        </div>
+
+        <!-- Manzanas (blocks) -->
+        <div class="space-y-1.5 pt-2 border-t border-slate-100">
+          <div class="text-xs font-extrabold text-slate-800">
+            • Manzanas (${state.blocks.length} · ${state.blockFaces.length} cuadras)
+          </div>
+          ${state.blocks
+            .map((b) => {
+              const sub = state.subterritories.find((s) => s.id === b.subterritory_id);
+              const faces = state.blockFaces.filter((f) => f.block_id === b.id);
+              const streetsSummary = faces.map((f) => f.street_name).join(', ');
+              return `
+                <div class="flex items-center justify-between gap-2 bg-slate-50 px-3 py-2 rounded-xl border border-slate-200 text-xs">
+                  <div class="min-w-0">
+                    <div class="font-bold text-slate-900">
+                      ${sub ? `T-${escapeHtml(sub.code)} · ` : ''}Manzana ${escapeHtml(b.name)}
+                    </div>
+                    ${
+                      streetsSummary
+                        ? `<div class="text-[11px] text-slate-500 truncate">${escapeHtml(streetsSummary)}</div>`
+                        : ''
+                    }
+                  </div>
+                  <div class="flex items-center gap-1.5 shrink-0">
+                    <button type="button" data-edit-poly-type="block" data-edit-poly-id="${b.id}"
+                      class="edit-poly-btn bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold px-2.5 py-1 rounded-lg text-xs"
+                      title="Editar manzana">
+                      ✎ Editar
+                    </button>
+                    <button type="button" data-del-poly-type="block" data-del-poly-id="${b.id}"
+                      class="del-poly-btn bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold px-2 py-1 rounded-lg text-xs"
+                      title="Eliminar">
+                      ✕
+                    </button>
+                  </div>
+                </div>
+              `;
+            })
+            .join('')}
         </div>
       </div>
     </div>
@@ -683,7 +825,6 @@ function initAdminPolyPreviewMap() {
     polyPreviewMap = null;
   }
 
-  // Si hay un territorio padre elegido, centrar allí como guía visual
   const parentSubId = document.getElementById('poly-parent-subterritory')?.value;
   const parentSub = state.subterritories.find((s) => s.id === parentSubId);
   const initialPt =
@@ -699,7 +840,6 @@ function initAdminPolyPreviewMap() {
     attribution: '© OpenStreetMap'
   }).addTo(polyPreviewMap);
 
-  // Dibujar el contorno del territorio padre como referencia si existe
   if (Array.isArray(parentSub?.polygon_coords) && parentSub.polygon_coords.length >= 3) {
     window.L.polygon(parentSub.polygon_coords, {
       color: '#64748b',
@@ -749,7 +889,6 @@ function initAdminPolyPreviewMap() {
     });
   });
 
-  // Permitir agregar esquinas haciendo clic en el mapa en modo manual
   polyPreviewMap.on('click', (ev) => {
     if (!manualClickMode) return;
     polyPreviewCoords.push([ev.latlng.lat, ev.latlng.lng]);
@@ -863,6 +1002,124 @@ function bindPolygonMapperEvents(container, onDataChanged) {
     if (onDataChanged) await onDataChanged();
   };
 
+  // Botón Cancelar Edición de Polígono
+  const cancelEditBtn = document.getElementById('btn-cancel-edit-polygon');
+  if (cancelEditBtn) {
+    cancelEditBtn.onclick = () => {
+      editingPolygonState = null;
+      manualClickMode = false;
+      polyPreviewCoords = [];
+      polyStreetNames = [];
+      renderAdminView(container, onDataChanged);
+    };
+  }
+
+  // Botones Editar en el listado de Cargado en la Congregación
+  document.querySelectorAll('.edit-poly-btn').forEach((btn) => {
+    btn.onclick = () => {
+      const pType = btn.getAttribute('data-edit-poly-type');
+      const pId = btn.getAttribute('data-edit-poly-id');
+
+      if (pType === 'territory') {
+        const item = state.territories.find((t) => t.id === pId);
+        if (!item) return;
+        editingPolygonState = {
+          type: 'territory',
+          id: item.id,
+          name: item.code_or_name || '',
+          parentTerritoryId: '',
+          parentSubterritoryId: ''
+        };
+        polyPreviewCoords = Array.isArray(item.polygon_coords)
+          ? item.polygon_coords.map((p) => [...p])
+          : [];
+        polyStreetNames = [];
+      } else if (pType === 'subterritory') {
+        const item = state.subterritories.find((s) => s.id === pId);
+        if (!item) return;
+        editingPolygonState = {
+          type: 'subterritory',
+          id: item.id,
+          name: item.code || '',
+          parentTerritoryId: item.territory_id || '',
+          parentSubterritoryId: ''
+        };
+        polyPreviewCoords = Array.isArray(item.polygon_coords)
+          ? item.polygon_coords.map((p) => [...p])
+          : [];
+        polyStreetNames = [];
+      } else if (pType === 'block') {
+        const item = state.blocks.find((b) => b.id === pId);
+        if (!item) return;
+        const blockFaces = state.blockFaces.filter((f) => f.block_id === item.id);
+        editingPolygonState = {
+          type: 'block',
+          id: item.id,
+          name: item.name || '',
+          parentTerritoryId: '',
+          parentSubterritoryId: item.subterritory_id || ''
+        };
+        polyPreviewCoords = Array.isArray(item.polygon_coords)
+          ? item.polygon_coords.map((p) => [...p])
+          : [];
+        // Reconstruir el orden original de calles guardadas en las caras de la manzana
+        if (blockFaces.length > 0) {
+          const ordered = [];
+          for (let i = 0; i < blockFaces.length; i++) {
+            const prevIdx = (i - 1 + blockFaces.length) % blockFaces.length;
+            ordered.push(blockFaces[prevIdx].street_name);
+          }
+          polyStreetNames = ordered;
+        } else {
+          polyStreetNames = [];
+        }
+      }
+
+      manualClickMode = false;
+      renderAdminView(container, onDataChanged);
+      document.getElementById('poly-mapper-card')?.scrollIntoView({ behavior: 'smooth' });
+    };
+  });
+
+  // Botones Eliminar en el listado de Cargado en la Congregación
+  document.querySelectorAll('.del-poly-btn').forEach((btn) => {
+    btn.onclick = async () => {
+      const pType = btn.getAttribute('data-del-poly-type');
+      const pId = btn.getAttribute('data-del-poly-id');
+      if (!confirm('¿Seguro que querés eliminar este elemento?')) return;
+
+      if (pType === 'territory') {
+        const { error } = await supabase.from('terr_territories').delete().eq('id', pId);
+        if (error) {
+          showToast('Error al eliminar: ' + error.message, 'error');
+          return;
+        }
+      } else if (pType === 'subterritory') {
+        const { error } = await supabase.from('terr_subterritories').delete().eq('id', pId);
+        if (error) {
+          showToast('Error al eliminar: ' + error.message, 'error');
+          return;
+        }
+      } else if (pType === 'block') {
+        await supabase.from('terr_block_faces').delete().eq('block_id', pId);
+        const { error } = await supabase.from('terr_blocks').delete().eq('id', pId);
+        if (error) {
+          showToast('Error al eliminar: ' + error.message, 'error');
+          return;
+        }
+      }
+
+      if (editingPolygonState?.id === pId) {
+        editingPolygonState = null;
+        polyPreviewCoords = [];
+        polyStreetNames = [];
+      }
+      showToast('Elemento eliminado correctamente', 'info');
+      if (onDataChanged) await onDataChanged();
+      renderAdminView(container, onDataChanged);
+    };
+  });
+
   // Eventos del Mapeador Poligonal
   const typeSelect = document.getElementById('poly-entity-type');
   const parentTerrBox = document.getElementById('poly-parent-territory-box');
@@ -965,7 +1222,7 @@ function bindPolygonMapperEvents(container, onDataChanged) {
   };
 
   document.getElementById('btn-save-polygon').onclick = async () => {
-    const entityType = typeSelect.value;
+    const entityType = editingPolygonState ? editingPolygonState.type : typeSelect.value;
     const entityName = nameInput.value.trim();
 
     if (!entityName) {
@@ -985,42 +1242,81 @@ function bindPolygonMapperEvents(container, onDataChanged) {
 
     const saveBtn = document.getElementById('btn-save-polygon');
     saveBtn.disabled = true;
-    saveBtn.textContent = 'Guardando...';
+    saveBtn.textContent = editingPolygonState ? 'Actualizando...' : 'Guardando...';
 
     if (entityType === 'territory') {
-      const { error } = await supabase.from('terr_territories').insert({
-        congregation_id: state.congregation.id,
-        code_or_name: entityName,
-        polygon_coords: polyPreviewCoords
-      });
-      if (error) {
-        showToast('Error al guardar: ' + error.message, 'error');
-        saveBtn.disabled = false;
-        saveBtn.textContent = '💾 Guardar en la Congregación';
-        return;
+      if (editingPolygonState) {
+        const { error } = await supabase
+          .from('terr_territories')
+          .update({
+            code_or_name: entityName,
+            polygon_coords: polyPreviewCoords
+          })
+          .eq('id', editingPolygonState.id);
+
+        if (error) {
+          showToast('Error al actualizar: ' + error.message, 'error');
+          saveBtn.disabled = false;
+          saveBtn.textContent = '💾 Actualizar Cambios';
+          return;
+        }
+        showToast(`Territorio asignado "${entityName}" actualizado`, 'success');
+      } else {
+        const { error } = await supabase.from('terr_territories').insert({
+          congregation_id: state.congregation.id,
+          code_or_name: entityName,
+          polygon_coords: polyPreviewCoords
+        });
+        if (error) {
+          showToast('Error al guardar: ' + error.message, 'error');
+          saveBtn.disabled = false;
+          saveBtn.textContent = '💾 Guardar en la Congregación';
+          return;
+        }
+        showToast(`Territorio asignado "${entityName}" guardado`, 'success');
       }
-      showToast(`Territorio asignado "${entityName}" guardado`, 'success');
     } else if (entityType === 'subterritory') {
       const parentTerrId = document.getElementById('poly-parent-territory').value || null;
-      const { error } = await supabase.from('terr_subterritories').insert({
-        congregation_id: state.congregation.id,
-        territory_id: parentTerrId,
-        code: entityName,
-        polygon_coords: polyPreviewCoords
-      });
-      if (error) {
-        showToast('Error al guardar Territorio: ' + error.message, 'error');
-        saveBtn.disabled = false;
-        saveBtn.textContent = '💾 Guardar en la Congregación';
-        return;
+      if (editingPolygonState) {
+        const { error } = await supabase
+          .from('terr_subterritories')
+          .update({
+            territory_id: parentTerrId,
+            code: entityName,
+            polygon_coords: polyPreviewCoords
+          })
+          .eq('id', editingPolygonState.id);
+
+        if (error) {
+          showToast('Error al actualizar Territorio: ' + error.message, 'error');
+          saveBtn.disabled = false;
+          saveBtn.textContent = '💾 Actualizar Cambios';
+          return;
+        }
+        showToast(`Territorio ${entityName} actualizado`, 'success');
+      } else {
+        const { error } = await supabase.from('terr_subterritories').insert({
+          congregation_id: state.congregation.id,
+          territory_id: parentTerrId,
+          code: entityName,
+          polygon_coords: polyPreviewCoords
+        });
+        if (error) {
+          showToast('Error al guardar Territorio: ' + error.message, 'error');
+          saveBtn.disabled = false;
+          saveBtn.textContent = '💾 Guardar en la Congregación';
+          return;
+        }
+        showToast(`Territorio ${entityName} guardado`, 'success');
       }
-      showToast(`Territorio ${entityName} guardado`, 'success');
     } else if (entityType === 'block') {
       const subId = document.getElementById('poly-parent-subterritory').value;
       if (!subId) {
         showToast('Elegí a qué Territorio pertenece esta manzana', 'error');
         saveBtn.disabled = false;
-        saveBtn.textContent = '💾 Guardar en la Congregación';
+        saveBtn.textContent = editingPolygonState
+          ? '💾 Actualizar Cambios'
+          : '💾 Guardar en la Congregación';
         return;
       }
 
@@ -1029,41 +1325,105 @@ function bindPolygonMapperEvents(container, onDataChanged) {
       const avgLng =
         polyPreviewCoords.reduce((acc, p) => acc + p[1], 0) / polyPreviewCoords.length;
 
-      const { data: newBlock, error: blkErr } = await supabase
-        .from('terr_blocks')
-        .insert({
-          congregation_id: state.congregation.id,
-          subterritory_id: subId,
-          name: entityName.toUpperCase(),
-          center_lat: avgLat,
-          center_lng: avgLng,
-          polygon_coords: polyPreviewCoords
-        })
-        .select()
-        .single();
+      if (editingPolygonState) {
+        const { error: updErr } = await supabase
+          .from('terr_blocks')
+          .update({
+            subterritory_id: subId,
+            name: entityName.toUpperCase(),
+            center_lat: avgLat,
+            center_lng: avgLng,
+            polygon_coords: polyPreviewCoords
+          })
+          .eq('id', editingPolygonState.id);
 
-      if (blkErr || !newBlock) {
-        showToast('Error al guardar manzana: ' + (blkErr?.message || ''), 'error');
-        saveBtn.disabled = false;
-        saveBtn.textContent = '💾 Guardar en la Congregación';
-        return;
+        if (updErr) {
+          showToast('Error al actualizar manzana: ' + updErr.message, 'error');
+          saveBtn.disabled = false;
+          saveBtn.textContent = '💾 Actualizar Cambios';
+          return;
+        }
+
+        const existingFaces = state.blockFaces.filter(
+          (f) => f.block_id === editingPolygonState.id
+        );
+
+        // Si mantiene la misma cantidad de lados, actualizar calle y coordenadas conservando historial
+        if (existingFaces.length === polyPreviewCoords.length) {
+          for (let i = 0; i < polyPreviewCoords.length; i++) {
+            const pt = polyPreviewCoords[i];
+            const nextPt = polyPreviewCoords[(i + 1) % polyPreviewCoords.length];
+            const streetLabel =
+              polyStreetNames[(i + 1) % polyStreetNames.length] ||
+              existingFaces[i].street_name ||
+              `Cara ${i + 1}`;
+            await supabase
+              .from('terr_block_faces')
+              .update({
+                street_name: streetLabel,
+                line_coords: [pt, nextPt]
+              })
+              .eq('id', existingFaces[i].id);
+          }
+        } else {
+          await supabase
+            .from('terr_block_faces')
+            .delete()
+            .eq('block_id', editingPolygonState.id);
+
+          const facesPayload = polyPreviewCoords.map((pt, i) => {
+            const nextPt = polyPreviewCoords[(i + 1) % polyPreviewCoords.length];
+            const streetLabel =
+              polyStreetNames[(i + 1) % polyStreetNames.length] || `Cara ${i + 1}`;
+            return {
+              congregation_id: state.congregation.id,
+              block_id: editingPolygonState.id,
+              street_name: streetLabel,
+              line_coords: [pt, nextPt]
+            };
+          });
+          await supabase.from('terr_block_faces').insert(facesPayload);
+        }
+
+        showToast(`Manzana ${entityName.toUpperCase()} actualizada`, 'success');
+      } else {
+        const { data: newBlock, error: blkErr } = await supabase
+          .from('terr_blocks')
+          .insert({
+            congregation_id: state.congregation.id,
+            subterritory_id: subId,
+            name: entityName.toUpperCase(),
+            center_lat: avgLat,
+            center_lng: avgLng,
+            polygon_coords: polyPreviewCoords
+          })
+          .select()
+          .single();
+
+        if (blkErr || !newBlock) {
+          showToast('Error al guardar manzana: ' + (blkErr?.message || ''), 'error');
+          saveBtn.disabled = false;
+          saveBtn.textContent = '💾 Guardar en la Congregación';
+          return;
+        }
+
+        const facesPayload = polyPreviewCoords.map((pt, i) => {
+          const nextPt = polyPreviewCoords[(i + 1) % polyPreviewCoords.length];
+          const streetLabel = polyStreetNames[(i + 1) % polyStreetNames.length] || `Cara ${i + 1}`;
+          return {
+            congregation_id: state.congregation.id,
+            block_id: newBlock.id,
+            street_name: streetLabel,
+            line_coords: [pt, nextPt]
+          };
+        });
+
+        await supabase.from('terr_block_faces').insert(facesPayload);
+        showToast(`Manzana ${entityName.toUpperCase()} guardada con ${facesPayload.length} caras`, 'success');
       }
-
-      const facesPayload = polyPreviewCoords.map((pt, i) => {
-        const nextPt = polyPreviewCoords[(i + 1) % polyPreviewCoords.length];
-        const streetLabel = polyStreetNames[(i + 1) % polyStreetNames.length] || `Cara ${i + 1}`;
-        return {
-          congregation_id: state.congregation.id,
-          block_id: newBlock.id,
-          street_name: streetLabel,
-          line_coords: [pt, nextPt]
-        };
-      });
-
-      await supabase.from('terr_block_faces').insert(facesPayload);
-      showToast(`Manzana ${entityName.toUpperCase()} guardada con ${facesPayload.length} caras`, 'success');
     }
 
+    editingPolygonState = null;
     manualClickMode = false;
     polyPreviewCoords = [];
     polyStreetNames = [];
