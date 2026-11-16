@@ -409,7 +409,7 @@ async function handleApartmentAction(aptId, action, container) {
   const labels = {
     answered: 'Registrado: Atendió',
     no_answer: 'Registrado: No atendió',
-    skipped: 'Salteado por 10 minutos',
+    skipped: 'Saltado por 10 minutos',
     do_not_visit: 'Marcado como No visitar',
     does_not_exist: 'Marcado como No existe'
   };
