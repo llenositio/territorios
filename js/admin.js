@@ -1616,6 +1616,31 @@ function bindUsersAdminEvents(container, onDataChanged) {
 // ============================================================================
 let buildingAdminSearch = '';
 let editingBuildingId = null;
+let editingBuildingApartments = [];
+let loadingEditApts = false;
+
+async function fetchBuildingApartmentsForAdmin(buildingId) {
+  loadingEditApts = true;
+  const { data, error } = await supabase
+    .from('terr_apartments')
+    .select('*')
+    .eq('building_id', buildingId)
+    .order('label', { ascending: true });
+
+  loadingEditApts = false;
+  if (error) {
+    showToast('Error al cargar timbres del edificio: ' + error.message, 'error');
+    editingBuildingApartments = [];
+    return;
+  }
+
+  editingBuildingApartments = (data || []).sort((a, b) =>
+    String(a.label || '').localeCompare(String(b.label || ''), 'es', {
+      numeric: true,
+      sensitivity: 'base'
+    })
+  );
+}
 
 function renderBuildingsAdminHtml() {
   const q = buildingAdminSearch.trim().toLowerCase();
@@ -1695,17 +1720,17 @@ function renderBuildingsAdminHtml() {
 
       ${renderImportadorHtml()}
 
-      <!-- EDITOR RÁPIDO DE EDIFICIO SELECCIONADO -->
+      <!-- EDITOR COMPLETO DE EDIFICIO Y SUS TIMBRES -->
       ${
         editingBldg
-          ? `<div id="edit-building-card" class="bg-amber-50 border-2 border-amber-400 p-4 rounded-2xl space-y-3 shadow-sm">
+          ? `<div id="edit-building-card" class="bg-amber-50 border-2 border-amber-400 p-4 rounded-2xl space-y-3.5 shadow-sm">
               <div class="flex items-center justify-between">
                 <h3 class="text-sm font-extrabold text-amber-950">
                   ✎ Editando: ${escapeHtml(editingBldg.street)} ${escapeHtml(editingBldg.street_number)}
                 </h3>
                 <button type="button" id="btn-cancel-edit-bldg"
                   class="bg-white border border-slate-300 text-slate-700 font-bold px-2.5 py-1 rounded-lg text-xs">
-                  Cancelar
+                  Cerrar
                 </button>
               </div>
 
@@ -1738,9 +1763,60 @@ function renderBuildingsAdminHtml() {
                 </select>
               </div>
 
+              <!-- VISUALIZADOR Y EDITOR DE TODOS LOS TIMBRES CARGADOS -->
+              <div class="bg-white p-3 rounded-xl border border-amber-200 space-y-2">
+                <div class="flex items-center justify-between">
+                  <span class="text-[11px] font-extrabold text-slate-800">
+                    🔔 Timbres cargados (${editingBuildingApartments.length})
+                  </span>
+                  <span class="text-[10px] text-slate-500">
+                    Tocá el nombre para renombrar o ✕ para borrar
+                  </span>
+                </div>
+
+                ${
+                  loadingEditApts
+                    ? `<div class="text-xs text-slate-500 py-2">Cargando timbres...</div>`
+                    : editingBuildingApartments.length === 0
+                      ? `<div class="text-xs text-slate-400 italic py-1">Este edificio no tiene timbres cargados todavía.</div>`
+                      : `<div class="flex flex-wrap gap-1.5 max-h-48 overflow-y-auto p-1">
+                          ${editingBuildingApartments
+                            .map((apt) => {
+                              const statusBadge =
+                                apt.status === 'do_not_visit'
+                                  ? 'border-rose-300 bg-rose-50 text-rose-800'
+                                  : apt.status === 'does_not_exist'
+                                    ? 'border-slate-300 bg-slate-100 text-slate-500 line-through'
+                                    : 'border-slate-300 bg-slate-50 text-slate-800';
+                              const statusTag =
+                                apt.status === 'do_not_visit'
+                                  ? ' (No visitar)'
+                                  : apt.status === 'does_not_exist'
+                                    ? ' (No existe)'
+                                    : '';
+                              return `
+                                <div class="inline-flex items-center gap-1 px-2 py-1 rounded-lg border text-xs font-bold ${statusBadge}">
+                                  <button type="button" data-rename-apt="${apt.id}" data-apt-label="${escapeHtml(apt.label)}"
+                                    class="rename-apt-btn hover:underline text-left"
+                                    title="Tocá para cambiar el nombre del timbre">
+                                    ${escapeHtml(apt.label)}${statusTag}
+                                  </button>
+                                  <button type="button" data-del-apt="${apt.id}" data-apt-label="${escapeHtml(apt.label)}"
+                                    class="del-apt-btn text-rose-600 hover:text-rose-800 font-black pl-1"
+                                    title="Eliminar este timbre">
+                                    ✕
+                                  </button>
+                                </div>
+                              `;
+                            })
+                            .join('')}
+                        </div>`
+                }
+              </div>
+
               <div>
                 <label class="block text-[11px] font-bold text-slate-700 mb-1">
-                  Agregar timbres nuevos (opcional, separados por coma)
+                  Agregar timbres faltantes (separados por coma)
                 </label>
                 <input type="text" id="edit-bldg-new-apts" placeholder="Ej: 5A, 5B, Portería"
                   class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white" />
@@ -1799,8 +1875,8 @@ function renderBuildingsAdminHtml() {
                         <div class="flex items-center gap-1.5 shrink-0">
                           <button type="button" data-edit-bldg="${b.id}"
                             class="edit-bldg-btn bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold px-2.5 py-1 rounded-lg text-xs"
-                            title="Editar edificio">
-                            ✎ Editar
+                            title="Ver timbres y editar edificio">
+                            ✎ Editar / Timbres
                           </button>
                           <button type="button" data-del-bldg="${b.id}"
                             class="del-bldg-btn bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold px-2 py-1 rounded-lg text-xs"
@@ -1915,12 +1991,60 @@ function bindBuildingsAdminEvents(container, onDataChanged) {
     };
   }
 
-  // Botones Editar edificio
+  // Botones Editar edificio (carga todos sus timbres para revisarlos)
   document.querySelectorAll('.edit-bldg-btn').forEach((btn) => {
-    btn.onclick = () => {
+    btn.onclick = async () => {
       editingBuildingId = btn.getAttribute('data-edit-bldg');
+      editingBuildingApartments = [];
       renderAdminView(container, onDataChanged);
       document.getElementById('edit-building-card')?.scrollIntoView({ behavior: 'smooth' });
+      await fetchBuildingApartmentsForAdmin(editingBuildingId);
+      renderAdminView(container, onDataChanged);
+    };
+  });
+
+  // Renombrar un timbre individual
+  document.querySelectorAll('.rename-apt-btn').forEach((btn) => {
+    btn.onclick = async () => {
+      const aptId = btn.getAttribute('data-rename-apt');
+      const oldLabel = btn.getAttribute('data-apt-label') || '';
+      const newLabel = prompt('Nuevo nombre o número para este timbre:', oldLabel);
+      if (!newLabel || newLabel.trim() === '' || newLabel.trim() === oldLabel) return;
+
+      const { error } = await supabase
+        .from('terr_apartments')
+        .update({ label: newLabel.trim() })
+        .eq('id', aptId);
+
+      if (error) {
+        showToast('Error al renombrar timbre: ' + error.message, 'error');
+        return;
+      }
+
+      showToast(`Timbre actualizado a "${newLabel.trim()}"`, 'success');
+      await fetchBuildingApartmentsForAdmin(editingBuildingId);
+      renderAdminView(container, onDataChanged);
+    };
+  });
+
+  // Eliminar un timbre individual (limpiando primero su historial en terr_apartment_logs)
+  document.querySelectorAll('.del-apt-btn').forEach((btn) => {
+    btn.onclick = async () => {
+      const aptId = btn.getAttribute('data-del-apt');
+      const aptLabel = btn.getAttribute('data-apt-label') || '';
+      if (!confirm(`¿Eliminar el timbre "${aptLabel}" de este edificio?`)) return;
+
+      await supabase.from('terr_apartment_logs').delete().eq('apartment_id', aptId);
+      const { error } = await supabase.from('terr_apartments').delete().eq('id', aptId);
+
+      if (error) {
+        showToast('Error al eliminar timbre: ' + error.message, 'error');
+        return;
+      }
+
+      showToast(`Timbre "${aptLabel}" eliminado`, 'info');
+      await fetchBuildingApartmentsForAdmin(editingBuildingId);
+      renderAdminView(container, onDataChanged);
     };
   });
 
@@ -1928,6 +2052,7 @@ function bindBuildingsAdminEvents(container, onDataChanged) {
   if (cancelEditBldgBtn) {
     cancelEditBldgBtn.onclick = () => {
       editingBuildingId = null;
+      editingBuildingApartments = [];
       renderAdminView(container, onDataChanged);
     };
   }
@@ -1992,8 +2117,8 @@ function bindBuildingsAdminEvents(container, onDataChanged) {
         }
       }
 
-      editingBuildingId = null;
       showToast('Edificio actualizado correctamente', 'success');
+      await fetchBuildingApartmentsForAdmin(editingBuildingId);
       if (onDataChanged) await onDataChanged();
       renderAdminView(container, onDataChanged);
     };
@@ -2017,7 +2142,6 @@ function bindBuildingsAdminEvents(container, onDataChanged) {
       btn.disabled = true;
       btn.textContent = '...';
 
-      // 1. Obtener IDs de los departamentos del edificio para limpiar sus logs
       const { data: apts } = await supabase
         .from('terr_apartments')
         .select('id')
@@ -2039,7 +2163,6 @@ function bindBuildingsAdminEvents(container, onDataChanged) {
         }
       }
 
-      // 2. Eliminar el edificio
       const { error: delBldgErr } = await supabase
         .from('terr_buildings')
         .delete()
@@ -2054,6 +2177,7 @@ function bindBuildingsAdminEvents(container, onDataChanged) {
 
       if (editingBuildingId === bId) {
         editingBuildingId = null;
+        editingBuildingApartments = [];
       }
 
       showToast(`Edificio "${label}" eliminado por completo`, 'info');
