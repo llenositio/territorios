@@ -1612,9 +1612,27 @@ function bindUsersAdminEvents(container, onDataChanged) {
 }
 
 // ============================================================================
-// SUBPESTAÑA 4: EDIFICIOS NUEVOS REPORTADOS E IMPORTADOR MASIVO
+// SUBPESTAÑA 4: EDIFICIOS REPORTADOS, IMPORTADOR Y GESTIÓN DE EDIFICIOS CARGADOS
 // ============================================================================
+let buildingAdminSearch = '';
+let editingBuildingId = null;
+
 function renderBuildingsAdminHtml() {
+  const q = buildingAdminSearch.trim().toLowerCase();
+  const filteredBuildings = (state.buildings || []).filter((b) => {
+    if (!q) return true;
+    const subCode = (b.terr_subterritories?.code || '').toLowerCase();
+    return (
+      (b.street || '').toLowerCase().includes(q) ||
+      String(b.street_number || '').toLowerCase().includes(q) ||
+      subCode.includes(q)
+    );
+  });
+
+  const editingBldg = editingBuildingId
+    ? (state.buildings || []).find((b) => b.id === editingBuildingId)
+    : null;
+
   return `
     <div class="space-y-4">
       ${
@@ -1676,6 +1694,127 @@ function renderBuildingsAdminHtml() {
       }
 
       ${renderImportadorHtml()}
+
+      <!-- EDITOR RÁPIDO DE EDIFICIO SELECCIONADO -->
+      ${
+        editingBldg
+          ? `<div id="edit-building-card" class="bg-amber-50 border-2 border-amber-400 p-4 rounded-2xl space-y-3 shadow-sm">
+              <div class="flex items-center justify-between">
+                <h3 class="text-sm font-extrabold text-amber-950">
+                  ✎ Editando: ${escapeHtml(editingBldg.street)} ${escapeHtml(editingBldg.street_number)}
+                </h3>
+                <button type="button" id="btn-cancel-edit-bldg"
+                  class="bg-white border border-slate-300 text-slate-700 font-bold px-2.5 py-1 rounded-lg text-xs">
+                  Cancelar
+                </button>
+              </div>
+
+              <div class="grid grid-cols-3 gap-2">
+                <div class="col-span-2">
+                  <label class="block text-[11px] font-bold text-slate-700 mb-1">Calle</label>
+                  <input type="text" id="edit-bldg-street" value="${escapeHtml(editingBldg.street)}"
+                    class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white font-semibold" />
+                </div>
+                <div>
+                  <label class="block text-[11px] font-bold text-slate-700 mb-1">Altura</label>
+                  <input type="text" id="edit-bldg-number" value="${escapeHtml(editingBldg.street_number)}"
+                    class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white font-semibold" />
+                </div>
+              </div>
+
+              <div>
+                <label class="block text-[11px] font-bold text-slate-700 mb-1">Territorio asignado</label>
+                <select id="edit-bldg-sub"
+                  class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white font-bold">
+                  <option value="">-- Sin territorio asignado --</option>
+                  ${state.subterritories
+                    .map(
+                      (s) =>
+                        `<option value="${s.id}" ${
+                          s.id === editingBldg.subterritory_id ? 'selected' : ''
+                        }>Territorio ${escapeHtml(s.code)}</option>`
+                    )
+                    .join('')}
+                </select>
+              </div>
+
+              <div>
+                <label class="block text-[11px] font-bold text-slate-700 mb-1">
+                  Agregar timbres nuevos (opcional, separados por coma)
+                </label>
+                <input type="text" id="edit-bldg-new-apts" placeholder="Ej: 5A, 5B, Portería"
+                  class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs bg-white" />
+              </div>
+
+              <label class="flex items-center gap-2 text-xs text-slate-700 font-semibold">
+                <input type="checkbox" id="edit-bldg-regeocode" class="rounded" />
+                <span>Recalcular ubicación GPS por dirección</span>
+              </label>
+
+              <button type="button" id="btn-save-edit-bldg"
+                class="w-full bg-amber-600 hover:bg-amber-500 text-white font-extrabold py-2.5 rounded-xl text-xs shadow">
+                💾 Guardar Cambios del Edificio
+              </button>
+            </div>`
+          : ''
+      }
+
+      <!-- LISTADO DE EDIFICIOS CARGADOS (CON EDITAR Y ELIMINAR EN CASCADA) -->
+      <div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
+        <div class="flex items-center justify-between gap-2">
+          <h3 class="text-sm font-extrabold text-slate-900">
+            🏢 Edificios Cargados (${(state.buildings || []).length})
+          </h3>
+        </div>
+
+        <input type="search" id="admin-bldg-search" value="${escapeHtml(buildingAdminSearch)}"
+          placeholder="Buscar por calle, altura o territorio..."
+          class="w-full px-3 py-2 rounded-xl border border-slate-300 text-xs focus:ring-2 focus:ring-blue-800 outline-none" />
+
+        ${
+          filteredBuildings.length === 0
+            ? `<p class="text-xs text-slate-500 text-center py-4">No hay edificios que coincidan.</p>`
+            : `<div class="space-y-1.5 max-h-[420px] overflow-y-auto pr-0.5">
+                ${filteredBuildings
+                  .map((b) => {
+                    const sub = state.subterritories.find((s) => s.id === b.subterritory_id);
+                    const subLabel = sub?.code || b.terr_subterritories?.code || '';
+                    return `
+                      <div class="flex items-center justify-between gap-2 bg-slate-50 px-3 py-2.5 rounded-xl border border-slate-200 text-xs">
+                        <div class="min-w-0">
+                          <div class="font-bold text-slate-900 truncate">
+                            ${escapeHtml(b.street)} ${escapeHtml(b.street_number)}
+                          </div>
+                          <div class="text-[11px] text-slate-500 flex items-center gap-1.5 mt-0.5">
+                            ${
+                              subLabel
+                                ? `<span class="bg-blue-100 text-blue-900 font-bold px-1.5 py-0.5 rounded">Terr. ${escapeHtml(
+                                    subLabel
+                                  )}</span>`
+                                : `<span class="text-amber-700 font-semibold">Sin territorio</span>`
+                            }
+                            ${b.lat && b.lng ? '<span>📍 GPS</span>' : '<span class="text-slate-400">Sin GPS</span>'}
+                          </div>
+                        </div>
+                        <div class="flex items-center gap-1.5 shrink-0">
+                          <button type="button" data-edit-bldg="${b.id}"
+                            class="edit-bldg-btn bg-amber-100 hover:bg-amber-200 text-amber-900 font-bold px-2.5 py-1 rounded-lg text-xs"
+                            title="Editar edificio">
+                            ✎ Editar
+                          </button>
+                          <button type="button" data-del-bldg="${b.id}"
+                            class="del-bldg-btn bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold px-2 py-1 rounded-lg text-xs"
+                            title="Eliminar edificio y todos sus timbres">
+                            ✕
+                          </button>
+                        </div>
+                      </div>
+                    `;
+                  })
+                  .join('')}
+              </div>`
+        }
+      </div>
     </div>
   `;
 }
@@ -1758,6 +1897,167 @@ function bindBuildingsAdminEvents(container, onDataChanged) {
         .eq('id', repId);
       showToast('Reporte descartado', 'info');
       await loadAdminData();
+      renderAdminView(container, onDataChanged);
+    };
+  });
+
+  // Buscador de edificios cargados
+  const searchInput = document.getElementById('admin-bldg-search');
+  if (searchInput) {
+    searchInput.oninput = (e) => {
+      buildingAdminSearch = e.target.value;
+      renderAdminView(container, onDataChanged);
+      const inp = document.getElementById('admin-bldg-search');
+      if (inp) {
+        inp.focus();
+        inp.setSelectionRange(inp.value.length, inp.value.length);
+      }
+    };
+  }
+
+  // Botones Editar edificio
+  document.querySelectorAll('.edit-bldg-btn').forEach((btn) => {
+    btn.onclick = () => {
+      editingBuildingId = btn.getAttribute('data-edit-bldg');
+      renderAdminView(container, onDataChanged);
+      document.getElementById('edit-building-card')?.scrollIntoView({ behavior: 'smooth' });
+    };
+  });
+
+  const cancelEditBldgBtn = document.getElementById('btn-cancel-edit-bldg');
+  if (cancelEditBldgBtn) {
+    cancelEditBldgBtn.onclick = () => {
+      editingBuildingId = null;
+      renderAdminView(container, onDataChanged);
+    };
+  }
+
+  const saveEditBldgBtn = document.getElementById('btn-save-edit-bldg');
+  if (saveEditBldgBtn && editingBuildingId) {
+    saveEditBldgBtn.onclick = async () => {
+      const street = document.getElementById('edit-bldg-street').value.trim();
+      const streetNumber = document.getElementById('edit-bldg-number').value.trim();
+      const subId = document.getElementById('edit-bldg-sub').value || null;
+      const newAptsRaw = document.getElementById('edit-bldg-new-apts').value.trim();
+      const regeocode = document.getElementById('edit-bldg-regeocode').checked;
+
+      if (!street || !streetNumber) {
+        showToast('Completá calle y altura', 'error');
+        return;
+      }
+
+      saveEditBldgBtn.disabled = true;
+      saveEditBldgBtn.textContent = 'Guardando cambios...';
+
+      const payload = {
+        street,
+        street_number: streetNumber,
+        subterritory_id: subId
+      };
+
+      if (regeocode) {
+        const coords = await geocodeAddress(street, streetNumber);
+        if (coords.lat && coords.lng) {
+          payload.lat = coords.lat;
+          payload.lng = coords.lng;
+        }
+      }
+
+      const { error } = await supabase
+        .from('terr_buildings')
+        .update(payload)
+        .eq('id', editingBuildingId);
+
+      if (error) {
+        showToast('Error al actualizar edificio: ' + error.message, 'error');
+        saveEditBldgBtn.disabled = false;
+        saveEditBldgBtn.textContent = '💾 Guardar Cambios del Edificio';
+        return;
+      }
+
+      if (newAptsRaw) {
+        const newLabels = newAptsRaw
+          .split(',')
+          .map((x) => x.trim())
+          .filter(Boolean);
+        if (newLabels.length > 0) {
+          await supabase.from('terr_apartments').insert(
+            newLabels.map((label) => ({
+              congregation_id: state.congregation.id,
+              building_id: editingBuildingId,
+              label,
+              status: 'active'
+            }))
+          );
+        }
+      }
+
+      editingBuildingId = null;
+      showToast('Edificio actualizado correctamente', 'success');
+      if (onDataChanged) await onDataChanged();
+      renderAdminView(container, onDataChanged);
+    };
+  }
+
+  // Botones Eliminar edificio en cascada (logs -> departamentos -> edificio)
+  document.querySelectorAll('.del-bldg-btn').forEach((btn) => {
+    btn.onclick = async () => {
+      const bId = btn.getAttribute('data-del-bldg');
+      const bldg = (state.buildings || []).find((x) => x.id === bId);
+      const label = bldg ? `${bldg.street} ${bldg.street_number}` : 'este edificio';
+
+      if (
+        !confirm(
+          `¿Seguro que querés eliminar "${label}" y todos sus departamentos e historial?`
+        )
+      ) {
+        return;
+      }
+
+      btn.disabled = true;
+      btn.textContent = '...';
+
+      // 1. Obtener IDs de los departamentos del edificio para limpiar sus logs
+      const { data: apts } = await supabase
+        .from('terr_apartments')
+        .select('id')
+        .eq('building_id', bId);
+
+      const aptIds = (apts || []).map((a) => a.id);
+      if (aptIds.length > 0) {
+        await supabase.from('terr_apartment_logs').delete().in('apartment_id', aptIds);
+        const { error: delAptsErr } = await supabase
+          .from('terr_apartments')
+          .delete()
+          .eq('building_id', bId);
+
+        if (delAptsErr) {
+          showToast('Error al eliminar departamentos: ' + delAptsErr.message, 'error');
+          btn.disabled = false;
+          btn.textContent = '✕';
+          return;
+        }
+      }
+
+      // 2. Eliminar el edificio
+      const { error: delBldgErr } = await supabase
+        .from('terr_buildings')
+        .delete()
+        .eq('id', bId);
+
+      if (delBldgErr) {
+        showToast('Error al eliminar edificio: ' + delBldgErr.message, 'error');
+        btn.disabled = false;
+        btn.textContent = '✕';
+        return;
+      }
+
+      if (editingBuildingId === bId) {
+        editingBuildingId = null;
+      }
+
+      showToast(`Edificio "${label}" eliminado por completo`, 'info');
+      if (onDataChanged) await onDataChanged();
       renderAdminView(container, onDataChanged);
     };
   });
