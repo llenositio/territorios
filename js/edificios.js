@@ -264,7 +264,7 @@ function renderIntercomBoard(container) {
           <p class="text-xs text-blue-200 mt-0.5">
             ${buildingApartments.length} ${
               buildingApartments.length === 1 ? 'timbre pendiente' : 'timbres pendientes'
-            } en cola${skippedCount > 0 ? ` · ${skippedCount} salteado(s) por 10 min` : ''}
+            } en cola${skippedCount > 0 ? ` · ${skippedCount} saltado(s) por 10 min` : ''}
           </p>
         </div>
         <button id="btn-refresh-apts"
@@ -282,8 +282,8 @@ function renderIntercomBoard(container) {
               <p class="text-sm text-emerald-700 mt-1">
                 ${
                   skippedCount > 0
-                    ? `Hay ${skippedCount} timbre(s) salteado(s) que volverán automáticamente al cumplirse los 10 minutos.`
-                    : 'No quedan timbres pendientes o salteados para tocar ahora.'
+                    ? `Hay ${skippedCount} timbre(s) saltado(s) que volverán automáticamente al cumplirse los 10 minutos.`
+                    : 'No quedan timbres pendientes o saltados para tocar ahora.'
                 }
               </p>
             </div>`
