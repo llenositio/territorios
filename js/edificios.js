@@ -10,8 +10,59 @@ import {
 
 let searchQuery = '';
 let selectedBuilding = null;
+let allBuildingApartments = [];
 let buildingApartments = [];
 let showNewReportModal = false;
+let skipRequeueTimer = null;
+
+function clearSkipTimer() {
+  if (skipRequeueTimer) {
+    clearTimeout(skipRequeueTimer);
+    skipRequeueTimer = null;
+  }
+}
+
+function sortApartmentsByPriority(list) {
+  return [...list].sort((a, b) => {
+    if (!a.last_visited_at && b.last_visited_at) return -1;
+    if (a.last_visited_at && !b.last_visited_at) return 1;
+    if (a.last_visited_at && b.last_visited_at) {
+      const diff =
+        new Date(a.last_visited_at).getTime() - new Date(b.last_visited_at).getTime();
+      if (diff !== 0) return diff;
+    }
+    return String(a.label || '').localeCompare(String(b.label || ''), 'es', {
+      numeric: true,
+      sensitivity: 'base'
+    });
+  });
+}
+
+function refreshActiveQueueAndSchedule(container) {
+  clearSkipTimer();
+  const now = Date.now();
+
+  const available = allBuildingApartments.filter(
+    (apt) => !apt.skipped_until || new Date(apt.skipped_until).getTime() <= now
+  );
+  buildingApartments = sortApartmentsByPriority(available);
+
+  // Programar reincorporación exacta cuando venza el próximo timbre salteado
+  const futureSkips = allBuildingApartments
+    .filter((apt) => apt.skipped_until && new Date(apt.skipped_until).getTime() > now)
+    .map((apt) => new Date(apt.skipped_until).getTime());
+
+  if (futureSkips.length > 0 && selectedBuilding) {
+    const nextWakeUp = Math.min(...futureSkips);
+    const delayMs = Math.max(500, nextWakeUp - now + 200);
+    skipRequeueTimer = setTimeout(() => {
+      if (selectedBuilding) {
+        refreshActiveQueueAndSchedule(container);
+        renderEdificiosView(container);
+      }
+    }, delayMs);
+  }
+}
 
 export async function loadBuildings() {
   if (!state.congregation?.id) return;
@@ -32,6 +83,8 @@ export function renderEdificiosView(container) {
     renderIntercomBoard(container);
     return;
   }
+
+  clearSkipTimer();
 
   let list = state.buildings.map((b) => ({
     ...b,
@@ -155,7 +208,7 @@ export function renderEdificiosView(container) {
       selectedBuilding = state.buildings.find((x) => x.id === bId) || null;
       if (selectedBuilding) {
         requestOnDemandGps({ silent: true });
-        await fetchBuildingApartments(selectedBuilding.id);
+        await fetchBuildingApartments(selectedBuilding.id, container);
         renderEdificiosView(container);
       }
     };
@@ -166,7 +219,7 @@ export function renderEdificiosView(container) {
   }
 }
 
-async function fetchBuildingApartments(buildingId) {
+async function fetchBuildingApartments(buildingId, container) {
   const { data, error } = await supabase
     .from('terr_apartments')
     .select('*')
@@ -177,18 +230,23 @@ async function fetchBuildingApartments(buildingId) {
 
   if (error) {
     showToast('Error cargando departamentos', 'error');
+    allBuildingApartments = [];
     buildingApartments = [];
     return;
   }
 
-  const now = Date.now();
-  buildingApartments = (data || []).filter(
-    (apt) => !apt.skipped_until || new Date(apt.skipped_until).getTime() <= now
-  );
+  allBuildingApartments = data || [];
+  refreshActiveQueueAndSchedule(container);
 }
 
 function renderIntercomBoard(container) {
+  refreshActiveQueueAndSchedule(container);
   const currentApt = buildingApartments[0] || null;
+
+  const now = Date.now();
+  const skippedCount = allBuildingApartments.filter(
+    (apt) => apt.skipped_until && new Date(apt.skipped_until).getTime() > now
+  ).length;
 
   container.innerHTML = `
     <div class="space-y-4 pb-24">
@@ -206,7 +264,7 @@ function renderIntercomBoard(container) {
           <p class="text-xs text-blue-200 mt-0.5">
             ${buildingApartments.length} ${
               buildingApartments.length === 1 ? 'timbre pendiente' : 'timbres pendientes'
-            } en cola
+            } en cola${skippedCount > 0 ? ` · ${skippedCount} salteado(s) por 10 min` : ''}
           </p>
         </div>
         <button id="btn-refresh-apts"
@@ -222,7 +280,11 @@ function renderIntercomBoard(container) {
               <div class="text-4xl mb-2">✅</div>
               <h3 class="font-extrabold text-emerald-900 text-lg">¡Edificio al día!</h3>
               <p class="text-sm text-emerald-700 mt-1">
-                No quedan timbres pendientes o salteados para tocar ahora.
+                ${
+                  skippedCount > 0
+                    ? `Hay ${skippedCount} timbre(s) salteado(s) que volverán automáticamente al cumplirse los 10 minutos.`
+                    : 'No quedan timbres pendientes o salteados para tocar ahora.'
+                }
               </p>
             </div>`
           : `<div class="bg-white p-5 rounded-3xl shadow-md border border-slate-200 space-y-5">
@@ -283,12 +345,13 @@ function renderIntercomBoard(container) {
   `;
 
   document.getElementById('btn-back-buildings').onclick = () => {
+    clearSkipTimer();
     selectedBuilding = null;
     renderEdificiosView(container);
   };
 
   document.getElementById('btn-refresh-apts').onclick = async () => {
-    await fetchBuildingApartments(selectedBuilding.id);
+    await fetchBuildingApartments(selectedBuilding.id, container);
     renderEdificiosView(container);
   };
 
@@ -308,8 +371,8 @@ async function handleApartmentAction(aptId, action, container) {
   if (action === 'answered' || action === 'no_answer') {
     updatePayload = { last_visited_at: nowIso, skipped_until: null };
   } else if (action === 'skipped') {
-    const skip48h = new Date(Date.now() + 48 * 60 * 60 * 1000).toISOString();
-    updatePayload = { skipped_until: skip48h };
+    const skip10Min = new Date(Date.now() + 10 * 60 * 1000).toISOString();
+    updatePayload = { skipped_until: skip10Min };
   } else if (action === 'do_not_visit') {
     updatePayload = { status: 'do_not_visit' };
   } else if (action === 'does_not_exist') {
@@ -333,11 +396,20 @@ async function handleApartmentAction(aptId, action, container) {
     action
   });
 
-  buildingApartments = buildingApartments.filter((a) => a.id !== aptId);
+  if (action === 'do_not_visit' || action === 'does_not_exist') {
+    allBuildingApartments = allBuildingApartments.filter((a) => a.id !== aptId);
+  } else {
+    allBuildingApartments = allBuildingApartments.map((a) =>
+      a.id === aptId ? { ...a, ...updatePayload } : a
+    );
+  }
+
+  refreshActiveQueueAndSchedule(container);
+
   const labels = {
     answered: 'Registrado: Atendió',
     no_answer: 'Registrado: No atendió',
-    skipped: 'Salteado por 48 horas',
+    skipped: 'Salteado por 10 minutos',
     do_not_visit: 'Marcado como No visitar',
     does_not_exist: 'Marcado como No existe'
   };
