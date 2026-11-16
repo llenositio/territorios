@@ -47,7 +47,7 @@ function refreshActiveQueueAndSchedule(container) {
   );
   buildingApartments = sortApartmentsByPriority(available);
 
-  // Programar reincorporación exacta cuando venza el próximo timbre salteado
+  // Programar reincorporación exacta cuando venza el próximo timbre saltado
   const futureSkips = allBuildingApartments
     .filter((apt) => apt.skipped_until && new Date(apt.skipped_until).getTime() > now)
     .map((apt) => new Date(apt.skipped_until).getTime());
