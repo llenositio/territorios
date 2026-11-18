@@ -1,10 +1,11 @@
 import { supabase } from './supabase.js';
 import { state, isSuperadmin, isAdmin } from './state.js';
 import {
-  initAuth,
-  signOutUser,
-  renderAuthView,
-  renderPendingApprovalView
+  loadUserSession,
+  signOut,
+  renderLoginScreen,
+  renderCongregationRequestScreen,
+  renderStatusNoticeScreen
 } from './auth.js';
 import { loadBuildings, renderEdificiosView } from './edificios.js';
 import {
@@ -40,17 +41,23 @@ async function bootstrap() {
       return;
     }
 
-    const session = await initAuth();
-    if (!session) {
-      renderAuthView(root, async () => {
+    const sessionResult = await loadUserSession();
+    if (!sessionResult) {
+      renderLoginScreen(root, async () => {
         await bootstrap();
       });
       return;
     }
 
-    if (!state.profile || state.profile.status !== 'approved') {
-      root.innerHTML = renderPendingApprovalView();
-      document.getElementById('btn-logout-pending')?.addEventListener('click', signOutUser);
+    if (sessionResult.status === 'no_profile') {
+      await renderCongregationRequestScreen(root, async () => {
+        await bootstrap();
+      });
+      return;
+    }
+
+    if (sessionResult.status !== 'approved') {
+      renderStatusNoticeScreen(root, sessionResult.status);
       return;
     }
 
@@ -227,7 +234,7 @@ function renderMainShell() {
     </div>
   `;
 
-  document.getElementById('btn-logout-main').onclick = signOutUser;
+  document.getElementById('btn-logout-main').onclick = signOut;
 
   const superSelect = document.getElementById('superadmin-cong-select');
   if (superSelect) {
