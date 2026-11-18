@@ -152,6 +152,18 @@ export function requestOnDemandGps({ silent = false, onSuccess = null } = {}) {
   );
 }
 
+// Permite saltar directo a la pestaña Salidas desde Avance / Buscador Urgente
+window.goToSalidasWithTerritories = (territories = []) => {
+  if (Array.isArray(territories) && territories.length > 0) {
+    state.proposedTerritories = territories.map(String);
+    try {
+      localStorage.setItem('terr_proposed_territories', JSON.stringify(state.proposedTerritories));
+    } catch {}
+  }
+  state.currentTab = 'salidas';
+  renderMainShell();
+};
+
 function renderMainShell() {
   const root = document.getElementById('app-root');
   const adminMode = isAdmin();
@@ -176,7 +188,7 @@ function renderMainShell() {
     <div class="min-h-screen flex flex-col bg-slate-100">
       <!-- Header Superior -->
       <header class="bg-blue-950 text-white px-4 py-3 shadow-md sticky top-0 z-30">
-        <div class="max-w-3xl mx-auto flex items-center justify-between gap-2">
+        <div class="max-w-6xl mx-auto flex items-center justify-between gap-2">
           <div class="min-w-0">
             <div class="text-[10px] uppercase tracking-widest text-blue-300 font-bold">
               Territorios • ${escapeHtml(state.profile?.role || '')}
@@ -208,11 +220,11 @@ function renderMainShell() {
       </header>
 
       <!-- Contenedor Principal de Vista -->
-      <main id="tab-content" class="flex-1 max-w-3xl w-full mx-auto p-4"></main>
+      <main id="tab-content" class="flex-1 max-w-6xl w-full mx-auto p-4"></main>
 
       <!-- Barra de Navegación Inferior -->
       <nav class="fixed bottom-0 inset-x-0 bg-white border-t border-slate-200 z-30 shadow-lg">
-        <div class="max-w-3xl mx-auto grid ${gridColsClass}">
+        <div class="max-w-6xl mx-auto grid ${gridColsClass}">
           ${tabs
             .map((t) => {
               const active = state.currentTab === t.id;
