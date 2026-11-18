@@ -39,6 +39,21 @@ let statsSummary = {
   bySubterritory: []
 };
 
+function syncSelectedTerritoriesToState() {
+  const chosenCodes = statsSummary.bySubterritory
+    .filter((r) => selectedSalidaSubIds.has(r.id))
+    .map((r) => String(r.code));
+  state.proposedTerritories = chosenCodes;
+  try {
+    if (chosenCodes.length > 0) {
+      localStorage.setItem('terr_proposed_territories', JSON.stringify(chosenCodes));
+    } else {
+      localStorage.removeItem('terr_proposed_territories');
+    }
+  } catch {}
+  return chosenCodes;
+}
+
 function extractCoordsFromAnyShape(obj, outList) {
   if (!obj) return;
   if (Array.isArray(obj)) {
@@ -128,7 +143,6 @@ function getReferenceStreetsForSubs(subIds) {
     (f) => blockIds.has(f.block_id) && f.street_name
   );
 
-  // Calcular posición y orientación (horizontal vs vertical) de cada calle de la zona
   const streetInfo = [];
   faces.forEach((f) => {
     const blk = (state.blocks || []).find((b) => b.id === f.block_id);
@@ -162,12 +176,10 @@ function getReferenceStreetsForSubs(subIds) {
     }
   });
 
-  // Ordenar caras por cercanía al centro exacto de la zona seleccionada
   streetInfo.sort((a, b) => a.dist - b.dist);
 
   if (streetInfo.length > 0) {
     const first = streetInfo[0];
-    // Buscar la calle más cercana al centro que tenga orientación perpendicular (o nombre distinto)
     const cross =
       streetInfo.find(
         (s) =>
@@ -244,7 +256,7 @@ function computeDaysSinceLastWorked(subApts, subFaces) {
     }
   });
 
-  if (latestMs === 0) return null; // Nunca trabajado registrado
+  if (latestMs === 0) return null;
   const diffDays = Math.floor((Date.now() - latestMs) / (1000 * 60 * 60 * 24));
   return Math.max(0, diffDays);
 }
@@ -355,6 +367,7 @@ export async function loadStatistics() {
     if (rows.length > 0) {
       applySmartSalidaSuggestion();
     }
+    syncSelectedTerritoriesToState();
     lastCongregationId = state.congregation.id;
   }
 }
@@ -363,19 +376,16 @@ function applySmartSalidaSuggestion() {
   const candidates = statsSummary.bySubterritory.filter((r) => r.totalItems > 0);
   if (candidates.length === 0) return;
 
-  // 1. Elegir el territorio más atrasado como semilla
   const leastWorked = [...candidates].sort((a, b) => a.pct - b.pct);
   const seed = leastWorked[0];
 
   const picked = [seed];
   const others = leastWorked.slice(1).filter((c) => c.pct < 80);
 
-  // 2. Priorizar los vecinos geográficamente MÁS CERCANOS para que formen un bloque contiguo
   if (seed.center) {
     others.sort((a, b) => {
       const distA = distanceBetween(seed.center, a.center);
       const distB = distanceBetween(seed.center, b.center);
-      // Si la diferencia de avance es menor al 25%, manda la cercanía física
       if (Math.abs(a.pct - b.pct) <= 25) return distA - distB;
       return a.pct - b.pct;
     });
@@ -387,6 +397,7 @@ function applySmartSalidaSuggestion() {
   }
 
   selectedSalidaSubIds = new Set(picked.map((p) => p.id));
+  syncSelectedTerritoriesToState();
 }
 
 function getUrgentRecommendations() {
@@ -396,7 +407,6 @@ function getUrgentRecommendations() {
     .filter((r) => r.totalItems > 0 && r.center)
     .map((r) => {
       const meters = haversineMeters(urgentOrigin, r.center);
-      // Si nunca fue trabajado, le damos antigüedad alta equivalente a 365 días para el ranking
       const effectiveAgeDays = r.daysSinceLastWorked === null ? 365 : r.daysSinceLastWorked;
       return {
         ...r,
@@ -415,8 +425,6 @@ function getUrgentRecommendations() {
       }
       return (a.meters ?? 999999) - (b.meters ?? 999999);
     }
-    // Modo equilibrado: penaliza distancia en metros y premia días sin predicar
-    // Cada 100m (1 cuadra) equivale a ~15 días de antigüedad
     const scoreA = (a.meters ?? 999999) * 0.15 - a.effectiveAgeDays;
     const scoreB = (b.meters ?? 999999) * 0.15 - b.effectiveAgeDays;
     return scoreA - scoreB;
@@ -429,7 +437,6 @@ async function geocodePlannedAddress(queryText) {
   const clean = String(queryText || '').trim();
   if (!clean) return null;
 
-  // Calcular centro de referencia de la congregación actual usando los territorios ya mapeados
   const knownCenters = statsSummary.bySubterritory.map((r) => r.center).filter(Boolean);
   let viewboxParam = '';
   let cityHint = '';
@@ -441,12 +448,10 @@ async function geocodePlannedAddress(queryText) {
   if (knownCenters.length > 0) {
     const avgLat = knownCenters.reduce((a, c) => a + c.lat, 0) / knownCenters.length;
     const avgLng = knownCenters.reduce((a, c) => a + c.lng, 0) / knownCenters.length;
-    // Caja de ~15 km alrededor de la congregación (viewbox = left,top,right,bottom)
     const delta = 0.15;
     viewboxParam = `&viewbox=${avgLng - delta},${avgLat + delta},${avgLng + delta},${avgLat - delta}&bounded=1`;
   }
 
-  // Normalizar "calle1 y calle2" -> Nominatim suele entender mejor "calle1 & calle2"
   const normalizedStreet = clean.replace(/\s+y\s+/gi, ' & ');
   const fullQuery =
     cityHint && !normalizedStreet.toLowerCase().includes(cityHint.toLowerCase())
@@ -460,7 +465,6 @@ async function geocodePlannedAddress(queryText) {
   let res = await fetch(url, { headers: { 'Accept-Language': 'es' } });
   let data = res.ok ? await res.json() : [];
 
-  // Fallback sin bounded=1 si no encontró intersección exacta pero manteniendo viewbox de preferencia
   if ((!Array.isArray(data) || data.length === 0) && viewboxParam) {
     url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
       fullQuery
@@ -517,12 +521,13 @@ export function renderEstadisticasView(container) {
       : 0;
   const facePending = Math.max(0, statsSummary.totalFaces - statsSummary.completedFacesCount);
 
-  // Territorios ordenados de menor a mayor cobertura para sugerencia de salidas
   const rankedForSalidas = [...statsSummary.bySubterritory]
     .filter((r) => r.totalItems > 0)
     .sort((a, b) => a.pct - b.pct);
 
   const chosenSubs = statsSummary.bySubterritory.filter((r) => selectedSalidaSubIds.has(r.id));
+  syncSelectedTerritoriesToState();
+
   const suggestedPoint = getReferenceStreetsForSubs(selectedSalidaSubIds);
   const chosenPendingApts = chosenSubs.reduce((acc, s) => acc + (s.aptsTotal - s.aptsDone), 0);
   const chosenPendingFaces = chosenSubs.reduce((acc, s) => acc + (s.facesTotal - s.facesDone), 0);
@@ -714,10 +719,16 @@ export function renderEstadisticasView(container) {
                             ${chosenSubs.map((s) => `Territorio ${escapeHtml(s.code)}`).join(' • ')}
                           </div>
                         </div>
-                        <button type="button" id="btn-copy-salida-plan"
-                          class="bg-slate-900 hover:bg-slate-800 text-white font-bold px-3 py-1.5 rounded-lg text-xs">
-                          📋 Copiar propuesta
-                        </button>
+                        <div class="flex flex-wrap items-center gap-2">
+                          <button type="button" id="btn-copy-salida-plan"
+                            class="bg-slate-100 hover:bg-slate-200 text-slate-800 font-bold px-3 py-1.5 rounded-lg text-xs border border-slate-300">
+                            📋 Copiar propuesta
+                          </button>
+                          <button type="button" id="btn-send-salida-tab"
+                            class="bg-blue-900 hover:bg-blue-800 text-white font-bold px-3 py-1.5 rounded-lg text-xs shadow-xs">
+                            📅 Programar en Salidas →
+                          </button>
+                        </div>
                       </div>
                       <div class="grid grid-cols-1 sm:grid-cols-2 gap-2 text-xs pt-1 border-t border-slate-100">
                         <div>
@@ -975,6 +986,7 @@ function bindEstadisticasEvents(
       } else {
         selectedSalidaSubIds.add(subId);
       }
+      syncSelectedTerritoriesToState();
       renderEstadisticasView(container);
     };
   });
@@ -1000,6 +1012,16 @@ function bindEstadisticasEvents(
         }, 2000);
       } catch (e) {
         alert(text);
+      }
+    };
+  }
+
+  const sendSalidaTabBtn = document.getElementById('btn-send-salida-tab');
+  if (sendSalidaTabBtn) {
+    sendSalidaTabBtn.onclick = () => {
+      const codes = syncSelectedTerritoriesToState();
+      if (typeof window.goToSalidasWithTerritories === 'function') {
+        window.goToSalidasWithTerritories(codes);
       }
     };
   }
@@ -1098,6 +1120,7 @@ function bindEstadisticasEvents(
       } else {
         selectedSalidaSubIds.add(subId);
       }
+      syncSelectedTerritoriesToState();
       renderEstadisticasView(container);
     };
   });
