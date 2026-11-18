@@ -39,6 +39,43 @@ let statsSummary = {
   bySubterritory: []
 };
 
+function extractCoordsFromAnyShape(obj, outList) {
+  if (!obj) return;
+  if (Array.isArray(obj)) {
+    if (obj.length >= 2 && typeof obj[0] === 'number' && typeof obj[1] === 'number') {
+      const a = obj[0];
+      const b = obj[1];
+      if (Math.abs(a) <= 90 && Math.abs(b) > 90) {
+        outList.push({ lat: a, lng: b });
+      } else if (Math.abs(b) <= 90 && Math.abs(a) > 90) {
+        outList.push({ lat: b, lng: a });
+      } else {
+        // En Argentina ambos son negativos: lat ~ -20 a -55, lng ~ -53 a -73
+        if (Math.abs(a) < Math.abs(b)) {
+          outList.push({ lat: a, lng: b });
+        } else {
+          outList.push({ lat: b, lng: a });
+        }
+      }
+      return;
+    }
+    obj.forEach((item) => extractCoordsFromAnyShape(item, outList));
+    return;
+  }
+  if (typeof obj === 'object') {
+    if (obj.lat !== undefined && obj.lng !== undefined) {
+      outList.push({ lat: Number(obj.lat), lng: Number(obj.lng) });
+    } else if (obj.latitude !== undefined && obj.longitude !== undefined) {
+      outList.push({ lat: Number(obj.latitude), lng: Number(obj.longitude) });
+    } else {
+      if (obj.coordinates) extractCoordsFromAnyShape(obj.coordinates, outList);
+      if (obj.geometry) extractCoordsFromAnyShape(obj.geometry, outList);
+      if (obj.polygon) extractCoordsFromAnyShape(obj.polygon, outList);
+      if (obj.geom) extractCoordsFromAnyShape(obj.geom, outList);
+    }
+  }
+}
+
 function computeSubCenter(subId) {
   const pts = [];
   (state.buildings || []).forEach((b) => {
@@ -46,17 +83,21 @@ function computeSubCenter(subId) {
       pts.push({ lat: Number(b.lat), lng: Number(b.lng) });
     }
   });
+
+  const subBlockIds = new Set();
   (state.blocks || []).forEach((blk) => {
-    if (blk.subterritory_id === subId && Array.isArray(blk.polygon)) {
-      blk.polygon.forEach((p) => {
-        if (Array.isArray(p) && p.length >= 2) {
-          pts.push({ lat: Number(p[0]), lng: Number(p[1]) });
-        } else if (p && typeof p === 'object' && p.lat && p.lng) {
-          pts.push({ lat: Number(p.lat), lng: Number(p.lng) });
-        }
-      });
+    if (blk.subterritory_id === subId) {
+      subBlockIds.add(blk.id);
+      extractCoordsFromAnyShape(blk, pts);
     }
   });
+
+  (state.blockFaces || []).forEach((f) => {
+    if (subBlockIds.has(f.block_id)) {
+      extractCoordsFromAnyShape(f, pts);
+    }
+  });
+
   if (pts.length === 0) return null;
   const sum = pts.reduce((acc, p) => ({ lat: acc.lat + p.lat, lng: acc.lng + p.lng }), {
     lat: 0,
@@ -103,11 +144,10 @@ function getReferenceStreetsForSubs(subIds) {
       isHorizontal = Math.abs(lng1 - lng0) >= Math.abs(lat1 - lat0);
     } else if (f.lat && f.lng) {
       pt = { lat: Number(f.lat), lng: Number(f.lng) };
-    } else if (blk && Array.isArray(blk.polygon) && blk.polygon.length > 0) {
-      const p0 = blk.polygon[0];
-      pt = Array.isArray(p0)
-        ? { lat: Number(p0[0]), lng: Number(p0[1]) }
-        : { lat: Number(p0.lat), lng: Number(p0.lng) };
+    } else if (blk) {
+      const blkPts = [];
+      extractCoordsFromAnyShape(blk, blkPts);
+      if (blkPts.length > 0) pt = blkPts[0];
     }
 
     if (pt) {
@@ -382,25 +422,46 @@ async function geocodePlannedAddress(queryText) {
   const clean = String(queryText || '').trim();
   if (!clean) return null;
 
-  // Intentar extraer ciudad de la congregación (ej. "Centro (Mar del Plata)" -> "Mar del Plata")
+  // Calcular centro de referencia de la congregación actual usando los territorios ya mapeados
+  const knownCenters = statsSummary.bySubterritory.map((r) => r.center).filter(Boolean);
+  let viewboxParam = '';
+  let cityHint = '';
+
   const congName = state.congregation?.nombre || '';
   const parenMatch = congName.match(/\(([^)]+)\)/);
-  const cityHint = parenMatch ? parenMatch[1].trim() : '';
+  if (parenMatch) cityHint = parenMatch[1].trim();
 
+  if (knownCenters.length > 0) {
+    const avgLat = knownCenters.reduce((a, c) => a + c.lat, 0) / knownCenters.length;
+    const avgLng = knownCenters.reduce((a, c) => a + c.lng, 0) / knownCenters.length;
+    // Caja de ~15 km alrededor de la congregación (viewbox = left,top,right,bottom)
+    const delta = 0.15;
+    viewboxParam = `&viewbox=${avgLng - delta},${avgLat + delta},${avgLng + delta},${avgLat - delta}&bounded=1`;
+  }
+
+  // Normalizar "calle1 y calle2" -> Nominatim suele entender mejor "calle1 & calle2"
+  const normalizedStreet = clean.replace(/\s+y\s+/gi, ' & ');
   const fullQuery =
-    cityHint && !clean.toLowerCase().includes(cityHint.toLowerCase())
-      ? `${clean}, ${cityHint}, Argentina`
-      : `${clean}, Argentina`;
+    cityHint && !normalizedStreet.toLowerCase().includes(cityHint.toLowerCase())
+      ? `${normalizedStreet}, ${cityHint}, Argentina`
+      : `${normalizedStreet}, Argentina`;
 
-  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
+  let url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
     fullQuery
-  )}`;
+  )}${viewboxParam}`;
 
-  const res = await fetch(url, {
-    headers: { 'Accept-Language': 'es' }
-  });
-  if (!res.ok) return null;
-  const data = await res.json();
+  let res = await fetch(url, { headers: { 'Accept-Language': 'es' } });
+  let data = res.ok ? await res.json() : [];
+
+  // Fallback sin bounded=1 si no encontró intersección exacta pero manteniendo viewbox de preferencia
+  if ((!Array.isArray(data) || data.length === 0) && viewboxParam) {
+    url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
+      fullQuery
+    )}${viewboxParam.replace('&bounded=1', '')}`;
+    res = await fetch(url, { headers: { 'Accept-Language': 'es' } });
+    data = res.ok ? await res.json() : [];
+  }
+
   if (!Array.isArray(data) || data.length === 0) return null;
 
   return {
