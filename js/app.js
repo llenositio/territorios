@@ -4,7 +4,6 @@ import {
   initAuth,
   signOutUser,
   renderAuthView,
-  bindAuthEvents,
   renderPendingApprovalView
 } from './auth.js';
 import { loadBuildings, renderEdificiosView } from './edificios.js';
@@ -43,8 +42,7 @@ async function bootstrap() {
 
     const session = await initAuth();
     if (!session) {
-      root.innerHTML = renderAuthView();
-      bindAuthEvents(async () => {
+      renderAuthView(root, async () => {
         await bootstrap();
       });
       return;
