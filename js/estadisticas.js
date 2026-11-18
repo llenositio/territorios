@@ -24,6 +24,13 @@ let presentationMode = false;
 let selectedSalidaSubIds = new Set();
 let lastCongregationId = null;
 
+// Estado del Buscador Urgente por Ubicación
+let urgentOrigin = null; // { lat, lng, label }
+let urgentAddressQuery = '';
+let urgentPriorityMode = 'balanced'; // 'balanced' | 'closest' | 'oldest'
+let urgentStatusMsg = '';
+let urgentLoading = false;
+
 let statsSummary = {
   totalApts: 0,
   visitedAptsCount: 0,
@@ -152,6 +159,54 @@ function distanceBetween(c1, c2) {
   return Math.sqrt(dLat * dLat + dLng * dLng);
 }
 
+// Distancia real en metros (Fórmula de Haversine)
+function haversineMeters(c1, c2) {
+  if (!c1 || !c2) return null;
+  const R = 6371000;
+  const toRad = (deg) => (deg * Math.PI) / 180;
+  const dLat = toRad(c2.lat - c1.lat);
+  const dLng = toRad(c2.lng - c1.lng);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(c1.lat)) *
+      Math.cos(toRad(c2.lat)) *
+      Math.sin(dLng / 2) *
+      Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return Math.round(R * c);
+}
+
+function formatDistanceLabel(meters) {
+  if (meters === null || meters === undefined) return 'Sin ubicación';
+  const blocks = Math.max(1, Math.round(meters / 100));
+  if (meters < 1000) {
+    return `${meters} m (~${blocks} ${blocks === 1 ? 'cuadra' : 'cuadras'})`;
+  }
+  return `${(meters / 1000).toFixed(1)} km (~${blocks} cuadras)`;
+}
+
+function computeDaysSinceLastWorked(subApts, subFaces) {
+  let latestMs = 0;
+
+  subApts.forEach((a) => {
+    if (a.last_visited_at) {
+      const ms = new Date(a.last_visited_at).getTime();
+      if (!Number.isNaN(ms) && ms > latestMs) latestMs = ms;
+    }
+  });
+
+  subFaces.forEach((f) => {
+    if (f.last_completed_at) {
+      const ms = new Date(f.last_completed_at).getTime();
+      if (!Number.isNaN(ms) && ms > latestMs) latestMs = ms;
+    }
+  });
+
+  if (latestMs === 0) return null; // Nunca trabajado registrado
+  const diffDays = Math.floor((Date.now() - latestMs) / (1000 * 60 * 60 * 24));
+  return Math.max(0, diffDays);
+}
+
 export async function loadStatistics() {
   if (!state.congregation?.id) return;
 
@@ -220,6 +275,7 @@ export async function loadStatistics() {
     const totalItems = subApts.length + subFaces.length;
     const doneItems = subAptsDone.length + subFacesDone.length;
     const pct = totalItems > 0 ? Math.round((doneItems / totalItems) * 100) : 0;
+    const daysSinceLastWorked = computeDaysSinceLastWorked(subApts, subFaces);
 
     return {
       id: sub.id,
@@ -231,6 +287,7 @@ export async function loadStatistics() {
       totalItems,
       doneItems,
       pct,
+      daysSinceLastWorked,
       center: computeSubCenter(sub.id)
     };
   });
@@ -246,6 +303,8 @@ export async function loadStatistics() {
   // Recalcular sugerencia inteligente al entrar o cambiar de congregación
   if (lastCongregationId !== state.congregation.id) {
     selectedSalidaSubIds = new Set();
+    urgentOrigin = null;
+    urgentStatusMsg = '';
     if (rows.length > 0) {
       applySmartSalidaSuggestion();
     }
@@ -281,6 +340,74 @@ function applySmartSalidaSuggestion() {
   }
 
   selectedSalidaSubIds = new Set(picked.map((p) => p.id));
+}
+
+function getUrgentRecommendations() {
+  if (!urgentOrigin) return [];
+
+  const candidates = statsSummary.bySubterritory
+    .filter((r) => r.totalItems > 0 && r.center)
+    .map((r) => {
+      const meters = haversineMeters(urgentOrigin, r.center);
+      // Si nunca fue trabajado, le damos antigüedad alta equivalente a 365 días para el ranking
+      const effectiveAgeDays = r.daysSinceLastWorked === null ? 365 : r.daysSinceLastWorked;
+      return {
+        ...r,
+        meters,
+        effectiveAgeDays
+      };
+    });
+
+  candidates.sort((a, b) => {
+    if (urgentPriorityMode === 'closest') {
+      return (a.meters ?? 999999) - (b.meters ?? 999999);
+    }
+    if (urgentPriorityMode === 'oldest') {
+      if (b.effectiveAgeDays !== a.effectiveAgeDays) {
+        return b.effectiveAgeDays - a.effectiveAgeDays;
+      }
+      return (a.meters ?? 999999) - (b.meters ?? 999999);
+    }
+    // Modo equilibrado: penaliza distancia en metros y premia días sin predicar
+    // Cada 100m (1 cuadra) equivale a ~15 días de antigüedad
+    const scoreA = (a.meters ?? 999999) * 0.15 - a.effectiveAgeDays;
+    const scoreB = (b.meters ?? 999999) * 0.15 - b.effectiveAgeDays;
+    return scoreA - scoreB;
+  });
+
+  return candidates.slice(0, 4);
+}
+
+async function geocodePlannedAddress(queryText) {
+  const clean = String(queryText || '').trim();
+  if (!clean) return null;
+
+  // Intentar extraer ciudad de la congregación (ej. "Centro (Mar del Plata)" -> "Mar del Plata")
+  const congName = state.congregation?.nombre || '';
+  const parenMatch = congName.match(/\(([^)]+)\)/);
+  const cityHint = parenMatch ? parenMatch[1].trim() : '';
+
+  const fullQuery =
+    cityHint && !clean.toLowerCase().includes(cityHint.toLowerCase())
+      ? `${clean}, ${cityHint}, Argentina`
+      : `${clean}, Argentina`;
+
+  const url = `https://nominatim.openstreetmap.org/search?format=json&limit=1&q=${encodeURIComponent(
+    fullQuery
+  )}`;
+
+  const res = await fetch(url, {
+    headers: { 'Accept-Language': 'es' }
+  });
+  if (!res.ok) return null;
+  const data = await res.json();
+  if (!Array.isArray(data) || data.length === 0) return null;
+
+  return {
+    lat: Number(data[0].lat),
+    lng: Number(data[0].lon),
+    label: clean
+  };
 }
 
 function buildPictogramGridHtml(pct, filledIcon, emptyIcon, activeBgClass, inactiveBgClass) {
@@ -331,6 +458,8 @@ export function renderEstadisticasView(container) {
   const suggestedPoint = getReferenceStreetsForSubs(selectedSalidaSubIds);
   const chosenPendingApts = chosenSubs.reduce((acc, s) => acc + (s.aptsTotal - s.aptsDone), 0);
   const chosenPendingFaces = chosenSubs.reduce((acc, s) => acc + (s.facesTotal - s.facesDone), 0);
+
+  const urgentRecs = getUrgentRecommendations();
 
   container.innerHTML = `
     <div class="space-y-4 pb-24" id="printable-stats-area">
@@ -539,6 +668,158 @@ export function renderEstadisticasView(container) {
             </div>`
       }
 
+      <!-- BUSCADOR URGENTE POR UBICACIÓN (IDEAL PARA VISITA DEL VIAJANTE / CAMPO) -->
+      ${
+        presentationMode
+          ? ''
+          : `<div class="bg-rose-50 border border-rose-300 p-4 rounded-2xl space-y-3 print:hidden">
+              <div class="flex flex-wrap items-start justify-between gap-2">
+                <div>
+                  <h3 class="text-sm font-extrabold text-rose-950">
+                    🚨 Buscador Urgente por Ubicación
+                  </h3>
+                  <p class="text-[11px] text-rose-900">
+                    Combiná tu ubicación actual (o una esquina donde vas a estar) con los territorios que hace más tiempo que no se predican:
+                  </p>
+                </div>
+              </div>
+
+              <!-- Controles de ubicación: GPS o Dirección planificada -->
+              <div class="grid grid-cols-1 md:grid-cols-12 gap-2 items-center">
+                <div class="md:col-span-4">
+                  <button type="button" id="btn-urgent-gps" ${urgentLoading ? 'disabled' : ''}
+                    class="w-full bg-rose-700 hover:bg-rose-800 disabled:opacity-60 text-white font-extrabold py-2.5 px-3 rounded-xl text-xs shadow flex items-center justify-center gap-1.5">
+                    <span>📍</span>
+                    <span>${urgentLoading ? 'Localizando...' : 'Usar mi ubicación actual (GPS)'}</span>
+                  </button>
+                </div>
+
+                <div class="md:col-span-8 flex gap-1.5">
+                  <input type="text" id="input-urgent-address"
+                    value="${escapeHtml(urgentAddressQuery)}"
+                    placeholder="O escribí esquina/dirección (ej. Córdoba y 9 de Julio)"
+                    class="flex-1 px-3 py-2 rounded-xl border border-rose-300 bg-white text-xs font-semibold text-slate-800" />
+                  <button type="button" id="btn-urgent-search-address" ${urgentLoading ? 'disabled' : ''}
+                    class="bg-slate-900 hover:bg-slate-800 disabled:opacity-60 text-white font-bold px-3.5 py-2 rounded-xl text-xs">
+                    Buscar
+                  </button>
+                </div>
+              </div>
+
+              <!-- Selector de criterio de prioridad -->
+              <div class="flex flex-wrap items-center justify-between gap-2 pt-0.5">
+                <span class="text-[11px] font-bold text-rose-950">Criterio de búsqueda:</span>
+                <div class="flex flex-wrap gap-1">
+                  ${[
+                    { id: 'balanced', label: '⚖️ Equilibrado (Cerca + Atrasado)' },
+                    { id: 'closest', label: '📍 Más cercanos primero' },
+                    { id: 'oldest', label: '⏳ Más tiempo sin predicar' }
+                  ]
+                    .map(
+                      (m) => `
+                      <button type="button" data-urgent-mode="${m.id}"
+                        class="urgent-mode-btn px-2.5 py-1 rounded-lg text-[11px] font-bold border ${
+                          urgentPriorityMode === m.id
+                            ? 'bg-rose-800 text-white border-rose-900'
+                            : 'bg-white text-rose-950 border-rose-200 hover:bg-rose-100'
+                        }">
+                        ${m.label}
+                      </button>
+                    `
+                    )
+                    .join('')}
+                </div>
+              </div>
+
+              ${
+                urgentStatusMsg
+                  ? `<div class="text-xs font-semibold text-rose-900 bg-white/80 px-3 py-2 rounded-xl border border-rose-200">
+                      ${escapeHtml(urgentStatusMsg)}
+                    </div>`
+                  : ''
+              }
+
+              <!-- Resultados recomendados -->
+              ${
+                urgentOrigin
+                  ? `<div class="space-y-2 pt-1">
+                      <div class="text-[11px] font-extrabold text-rose-950 uppercase tracking-wide">
+                        📌 Mejores opciones desde: ${escapeHtml(urgentOrigin.label)}
+                      </div>
+                      ${
+                        urgentRecs.length === 0
+                          ? `<p class="text-xs text-slate-600 bg-white p-3 rounded-xl border border-rose-200">
+                              No se encontraron territorios con coordenadas cargadas en esta congregación.
+                            </p>`
+                          : `<div class="grid grid-cols-1 md:grid-cols-2 gap-2.5">
+                              ${urgentRecs
+                                .map((rec, idx) => {
+                                  const isAlreadyInSalida = selectedSalidaSubIds.has(rec.id);
+                                  const pendingFaces = Math.max(0, rec.facesTotal - rec.facesDone);
+                                  const pendingApts = Math.max(0, rec.aptsTotal - rec.aptsDone);
+                                  const ageText =
+                                    rec.daysSinceLastWorked === null
+                                      ? 'Nunca trabajado en el sistema'
+                                      : rec.daysSinceLastWorked === 0
+                                        ? 'Trabajado hoy'
+                                        : `Hace ${rec.daysSinceLastWorked} días sin predicar`;
+                                  const mapsUrl = rec.center
+                                    ? `https://www.google.com/maps/dir/?api=1&destination=${rec.center.lat},${rec.center.lng}&travelmode=walking`
+                                    : null;
+
+                                  return `
+                                    <div class="bg-white p-3.5 rounded-xl border border-rose-200 shadow-2xs flex flex-col justify-between gap-2.5">
+                                      <div class="space-y-1">
+                                        <div class="flex items-center justify-between gap-2">
+                                          <span class="text-sm font-black text-slate-900">
+                                            #${idx + 1} • Territorio ${escapeHtml(rec.code)}
+                                          </span>
+                                          <span class="text-[11px] font-extrabold px-2 py-0.5 rounded-full bg-rose-100 text-rose-900">
+                                            ${formatDistanceLabel(rec.meters)}
+                                          </span>
+                                        </div>
+                                        <div class="text-xs font-bold ${
+                                          rec.daysSinceLastWorked === null || rec.daysSinceLastWorked >= 60
+                                            ? 'text-amber-700'
+                                            : 'text-slate-600'
+                                        }">
+                                          ⏳ ${ageText}
+                                        </div>
+                                        <div class="text-[11px] text-slate-500">
+                                          Pendiente: <b>${pendingFaces} cuadras</b> • <b>${pendingApts} timbres</b> (${rec.pct}% cubierto en el rango)
+                                        </div>
+                                      </div>
+
+                                      <div class="flex items-center gap-2 pt-1 border-t border-slate-100">
+                                        <button type="button" data-add-urgent-sub="${rec.id}"
+                                          class="add-urgent-sub-btn flex-1 py-1.5 px-2.5 rounded-lg text-xs font-bold transition-all ${
+                                            isAlreadyInSalida
+                                              ? 'bg-amber-100 text-amber-950 border border-amber-300'
+                                              : 'bg-slate-900 hover:bg-slate-800 text-white'
+                                          }">
+                                          ${isAlreadyInSalida ? '✓ En propuesta de salida' : '➕ Sumar a salida'}
+                                        </button>
+                                        ${
+                                          mapsUrl
+                                            ? `<a href="${mapsUrl}" target="_blank" rel="noopener noreferrer"
+                                                class="py-1.5 px-2.5 rounded-lg text-xs font-bold bg-blue-50 hover:bg-blue-100 text-blue-900 border border-blue-200">
+                                                🗺️ Ir
+                                              </a>`
+                                            : ''
+                                        }
+                                      </div>
+                                    </div>
+                                  `;
+                                })
+                                .join('')}
+                            </div>`
+                      }
+                    </div>`
+                  : ''
+              }
+            </div>`
+      }
+
       <!-- AVANCE DETALLADO POR SUBTERRITORIO -->
       ${
         presentationMode
@@ -654,4 +935,102 @@ function bindEstadisticasEvents(
       }
     };
   }
+
+  // --- Eventos del Buscador Urgente por Ubicación ---
+  const gpsBtn = document.getElementById('btn-urgent-gps');
+  if (gpsBtn) {
+    gpsBtn.onclick = () => {
+      if (!navigator.geolocation) {
+        urgentStatusMsg = 'Tu navegador no soporta geolocalización GPS.';
+        renderEstadisticasView(container);
+        return;
+      }
+      urgentLoading = true;
+      urgentStatusMsg = 'Obteniendo ubicación GPS...';
+      renderEstadisticasView(container);
+
+      navigator.geolocation.getCurrentPosition(
+        (pos) => {
+          urgentLoading = false;
+          urgentStatusMsg = '';
+          urgentOrigin = {
+            lat: pos.coords.latitude,
+            lng: pos.coords.longitude,
+            label: 'Mi ubicación actual (GPS)'
+          };
+          renderEstadisticasView(container);
+        },
+        (err) => {
+          urgentLoading = false;
+          urgentStatusMsg =
+            'No se pudo obtener el GPS (verificá permisos de ubicación) o escribí una esquina manualmente.';
+          renderEstadisticasView(container);
+        },
+        { enableHighAccuracy: true, timeout: 10000 }
+      );
+    };
+  }
+
+  const addrInput = document.getElementById('input-urgent-address');
+  if (addrInput) {
+    addrInput.oninput = () => {
+      urgentAddressQuery = addrInput.value;
+    };
+    addrInput.onkeydown = (e) => {
+      if (e.key === 'Enter') {
+        e.preventDefault();
+        document.getElementById('btn-urgent-search-address')?.click();
+      }
+    };
+  }
+
+  const searchAddrBtn = document.getElementById('btn-urgent-search-address');
+  if (searchAddrBtn) {
+    searchAddrBtn.onclick = async () => {
+      const q = (document.getElementById('input-urgent-address')?.value || '').trim();
+      urgentAddressQuery = q;
+      if (!q) {
+        urgentStatusMsg = 'Escribí una calle y altura o intersección (ej. "Córdoba y 9 de Julio").';
+        renderEstadisticasView(container);
+        return;
+      }
+      urgentLoading = true;
+      urgentStatusMsg = `Buscando "${q}" en el mapa...`;
+      renderEstadisticasView(container);
+
+      try {
+        const coords = await geocodePlannedAddress(q);
+        urgentLoading = false;
+        if (!coords) {
+          urgentStatusMsg = `No se encontró la dirección "${q}". Probá agregando la ciudad o una esquina cercana.`;
+        } else {
+          urgentStatusMsg = '';
+          urgentOrigin = coords;
+        }
+      } catch (e) {
+        urgentLoading = false;
+        urgentStatusMsg = 'Error al buscar la dirección. Verificá tu conexión.';
+      }
+      renderEstadisticasView(container);
+    };
+  }
+
+  document.querySelectorAll('.urgent-mode-btn').forEach((btn) => {
+    btn.onclick = () => {
+      urgentPriorityMode = btn.getAttribute('data-urgent-mode');
+      renderEstadisticasView(container);
+    };
+  });
+
+  document.querySelectorAll('.add-urgent-sub-btn').forEach((btn) => {
+    btn.onclick = () => {
+      const subId = btn.getAttribute('data-add-urgent-sub');
+      if (selectedSalidaSubIds.has(subId)) {
+        selectedSalidaSubIds.delete(subId);
+      } else {
+        selectedSalidaSubIds.add(subId);
+      }
+      renderEstadisticasView(container);
+    };
+  });
 }
