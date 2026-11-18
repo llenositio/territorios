@@ -22,7 +22,7 @@ let filterTo = getTodayIso();
 let activePreset = '90';
 let presentationMode = false;
 let selectedSalidaSubIds = new Set();
-let hasInitializedSelection = false;
+let lastCongregationId = null;
 
 let statsSummary = {
   totalApts: 0,
@@ -71,7 +71,6 @@ function getReferenceStreetsForSubs(subIds) {
     return { lat: sum.lat / centers.length, lng: sum.lng / centers.length };
   })();
 
-  // 1. Buscar esquinas reales donde dos calles distintas comparten un vértice en las cuadras seleccionadas
   const blockIds = new Set(
     (state.blocks || []).filter((b) => subIds.has(b.subterritory_id)).map((b) => b.id)
   );
@@ -79,52 +78,63 @@ function getReferenceStreetsForSubs(subIds) {
     (f) => blockIds.has(f.block_id) && f.street_name
   );
 
-  // Agrupar calles por vértice aproximado (~25m) para detectar intersecciones reales
-  const cornerMap = new Map();
+  // Calcular posición y orientación (horizontal vs vertical) de cada calle de la zona
+  const streetInfo = [];
   faces.forEach((f) => {
-    const pts = [];
-    if (f.lat && f.lng) pts.push({ lat: Number(f.lat), lng: Number(f.lng) });
-    if (Array.isArray(f.geometry)) {
-      f.geometry.forEach((p) => {
-        if (Array.isArray(p) && p.length >= 2) pts.push({ lat: Number(p[0]), lng: Number(p[1]) });
-      });
-    }
-    // También usar los vértices del polígono de su manzana
     const blk = (state.blocks || []).find((b) => b.id === f.block_id);
-    if (blk && Array.isArray(blk.polygon)) {
-      blk.polygon.forEach((p) => {
-        if (Array.isArray(p) && p.length >= 2) pts.push({ lat: Number(p[0]), lng: Number(p[1]) });
+    let pt = null;
+    let isHorizontal = null;
+
+    if (Array.isArray(f.geometry) && f.geometry.length >= 2) {
+      const p0 = f.geometry[0];
+      const p1 = f.geometry[f.geometry.length - 1];
+      const lat0 = Array.isArray(p0) ? Number(p0[0]) : Number(p0.lat);
+      const lng0 = Array.isArray(p0) ? Number(p0[1]) : Number(p0.lng);
+      const lat1 = Array.isArray(p1) ? Number(p1[0]) : Number(p1.lat);
+      const lng1 = Array.isArray(p1) ? Number(p1[1]) : Number(p1.lng);
+      pt = { lat: (lat0 + lat1) / 2, lng: (lng0 + lng1) / 2 };
+      isHorizontal = Math.abs(lng1 - lng0) >= Math.abs(lat1 - lat0);
+    } else if (f.lat && f.lng) {
+      pt = { lat: Number(f.lat), lng: Number(f.lng) };
+    } else if (blk && Array.isArray(blk.polygon) && blk.polygon.length > 0) {
+      const p0 = blk.polygon[0];
+      pt = Array.isArray(p0)
+        ? { lat: Number(p0[0]), lng: Number(p0[1]) }
+        : { lat: Number(p0.lat), lng: Number(p0.lng) };
+    }
+
+    if (pt) {
+      streetInfo.push({
+        name: f.street_name.trim(),
+        pt,
+        isHorizontal,
+        dist: center ? distanceBetween(center, pt) : 0
       });
     }
-
-    pts.forEach((pt) => {
-      // Redondear a ~30 metros para agrupar las calles que llegan a esa misma esquina
-      const key = `${pt.lat.toFixed(4)}_${pt.lng.toFixed(4)}`;
-      if (!cornerMap.has(key)) {
-        cornerMap.set(key, { pt, streets: new Set() });
-      }
-      cornerMap.get(key).streets.add(f.street_name.trim());
-    });
   });
 
-  // Quedarnos con esquinas que tengan al menos 2 calles distintas y elegir la más cercana al centro de la zona
-  let bestCorner = null;
-  let bestDist = Infinity;
+  // Ordenar caras por cercanía al centro exacto de la zona seleccionada
+  streetInfo.sort((a, b) => a.dist - b.dist);
 
-  cornerMap.forEach((entry) => {
-    if (entry.streets.size >= 2) {
-      const dist = center ? distanceBetween(center, entry.pt) : 0;
-      if (dist < bestDist) {
-        bestDist = dist;
-        const list = Array.from(entry.streets);
-        bestCorner = `${list[0]} y ${list[1]}`;
-      }
+  if (streetInfo.length > 0) {
+    const first = streetInfo[0];
+    // Buscar la calle más cercana al centro que tenga orientación perpendicular (o nombre distinto)
+    const cross =
+      streetInfo.find(
+        (s) =>
+          s.name.toLowerCase() !== first.name.toLowerCase() &&
+          first.isHorizontal !== null &&
+          s.isHorizontal !== null &&
+          s.isHorizontal !== first.isHorizontal
+      ) ||
+      streetInfo.find((s) => s.name.toLowerCase() !== first.name.toLowerCase());
+
+    if (cross) {
+      return `${first.name} y ${cross.name}`;
     }
-  });
+    return first.name;
+  }
 
-  if (bestCorner) return bestCorner;
-
-  // 2. Fallback: si hay edificios con altura exacta, sugerir esa dirección como punto de referencia
   const bldgs = (state.buildings || []).filter(
     (b) => subIds.has(b.subterritory_id) && b.street
   );
@@ -132,7 +142,7 @@ function getReferenceStreetsForSubs(subIds) {
     return `${bldgs[0].street} ${bldgs[0].street_number || ''}`.trim();
   }
 
-  return faces[0]?.street_name || 'Centro de la zona seleccionada';
+  return 'Centro de la zona seleccionada';
 }
 
 function distanceBetween(c1, c2) {
@@ -233,10 +243,13 @@ export async function loadStatistics() {
     bySubterritory: rows
   };
 
-  // Calcular sugerencia inicial automática: territorio menos trabajado + sus 2 vecinos más cercanos poco trabajados
-  if (!hasInitializedSelection && rows.length > 0) {
-    applySmartSalidaSuggestion();
-    hasInitializedSelection = true;
+  // Recalcular sugerencia inteligente al entrar o cambiar de congregación
+  if (lastCongregationId !== state.congregation.id) {
+    selectedSalidaSubIds = new Set();
+    if (rows.length > 0) {
+      applySmartSalidaSuggestion();
+    }
+    lastCongregationId = state.congregation.id;
   }
 }
 
@@ -244,25 +257,27 @@ function applySmartSalidaSuggestion() {
   const candidates = statsSummary.bySubterritory.filter((r) => r.totalItems > 0);
   if (candidates.length === 0) return;
 
-  // Ordenar por menor porcentaje trabajado primero
+  // 1. Elegir el territorio más atrasado como semilla
   const leastWorked = [...candidates].sort((a, b) => a.pct - b.pct);
   const seed = leastWorked[0];
 
   const picked = [seed];
-  const others = leastWorked.slice(1);
+  const others = leastWorked.slice(1).filter((c) => c.pct < 80);
 
+  // 2. Priorizar los vecinos geográficamente MÁS CERCANOS para que formen un bloque contiguo
   if (seed.center) {
     others.sort((a, b) => {
-      // Combinar cercanía geográfica + bajo porcentaje trabajado
-      const scoreA = distanceBetween(seed.center, a.center) * 100 + a.pct * 0.05;
-      const scoreB = distanceBetween(seed.center, b.center) * 100 + b.pct * 0.05;
-      return scoreA - scoreB;
+      const distA = distanceBetween(seed.center, a.center);
+      const distB = distanceBetween(seed.center, b.center);
+      // Si la diferencia de avance es menor al 25%, manda la cercanía física
+      if (Math.abs(a.pct - b.pct) <= 25) return distA - distB;
+      return a.pct - b.pct;
     });
   }
 
   for (const cand of others) {
     if (picked.length >= 3) break;
-    if (cand.pct < 80) picked.push(cand);
+    picked.push(cand);
   }
 
   selectedSalidaSubIds = new Set(picked.map((p) => p.id));
