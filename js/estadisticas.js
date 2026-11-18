@@ -59,24 +59,80 @@ function computeSubCenter(subId) {
 }
 
 function getReferenceStreetsForSubs(subIds) {
-  const streets = new Set();
-  (state.buildings || []).forEach((b) => {
-    if (subIds.has(b.subterritory_id) && b.street) {
-      streets.add(`${b.street} ${b.street_number || ''}`.trim());
-    }
-  });
-  if (streets.size > 0) {
-    return Array.from(streets).slice(0, 2).join(' / ');
-  }
+  const center = (() => {
+    const centers = Array.from(subIds)
+      .map((id) => computeSubCenter(id))
+      .filter(Boolean);
+    if (centers.length === 0) return null;
+    const sum = centers.reduce((a, c) => ({ lat: a.lat + c.lat, lng: a.lng + c.lng }), {
+      lat: 0,
+      lng: 0
+    });
+    return { lat: sum.lat / centers.length, lng: sum.lng / centers.length };
+  })();
+
+  // 1. Buscar esquinas reales donde dos calles distintas comparten un vértice en las cuadras seleccionadas
   const blockIds = new Set(
     (state.blocks || []).filter((b) => subIds.has(b.subterritory_id)).map((b) => b.id)
   );
-  (state.blockFaces || []).forEach((f) => {
-    if (blockIds.has(f.block_id) && f.street_name) {
-      streets.add(f.street_name);
+  const faces = (state.blockFaces || []).filter(
+    (f) => blockIds.has(f.block_id) && f.street_name
+  );
+
+  // Agrupar calles por vértice aproximado (~25m) para detectar intersecciones reales
+  const cornerMap = new Map();
+  faces.forEach((f) => {
+    const pts = [];
+    if (f.lat && f.lng) pts.push({ lat: Number(f.lat), lng: Number(f.lng) });
+    if (Array.isArray(f.geometry)) {
+      f.geometry.forEach((p) => {
+        if (Array.isArray(p) && p.length >= 2) pts.push({ lat: Number(p[0]), lng: Number(p[1]) });
+      });
+    }
+    // También usar los vértices del polígono de su manzana
+    const blk = (state.blocks || []).find((b) => b.id === f.block_id);
+    if (blk && Array.isArray(blk.polygon)) {
+      blk.polygon.forEach((p) => {
+        if (Array.isArray(p) && p.length >= 2) pts.push({ lat: Number(p[0]), lng: Number(p[1]) });
+      });
+    }
+
+    pts.forEach((pt) => {
+      // Redondear a ~30 metros para agrupar las calles que llegan a esa misma esquina
+      const key = `${pt.lat.toFixed(4)}_${pt.lng.toFixed(4)}`;
+      if (!cornerMap.has(key)) {
+        cornerMap.set(key, { pt, streets: new Set() });
+      }
+      cornerMap.get(key).streets.add(f.street_name.trim());
+    });
+  });
+
+  // Quedarnos con esquinas que tengan al menos 2 calles distintas y elegir la más cercana al centro de la zona
+  let bestCorner = null;
+  let bestDist = Infinity;
+
+  cornerMap.forEach((entry) => {
+    if (entry.streets.size >= 2) {
+      const dist = center ? distanceBetween(center, entry.pt) : 0;
+      if (dist < bestDist) {
+        bestDist = dist;
+        const list = Array.from(entry.streets);
+        bestCorner = `${list[0]} y ${list[1]}`;
+      }
     }
   });
-  return Array.from(streets).slice(0, 2).join(' y ') || 'Centro de la zona seleccionada';
+
+  if (bestCorner) return bestCorner;
+
+  // 2. Fallback: si hay edificios con altura exacta, sugerir esa dirección como punto de referencia
+  const bldgs = (state.buildings || []).filter(
+    (b) => subIds.has(b.subterritory_id) && b.street
+  );
+  if (bldgs.length > 0) {
+    return `${bldgs[0].street} ${bldgs[0].street_number || ''}`.trim();
+  }
+
+  return faces[0]?.street_name || 'Centro de la zona seleccionada';
 }
 
 function distanceBetween(c1, c2) {
