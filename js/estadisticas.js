@@ -1,6 +1,6 @@
 import { supabase } from './supabase.js';
 import { state } from './state.js';
-import { escapeHtml } from './ui-helpers.js';
+import { escapeHtml, fetchAllRows } from './ui-helpers.js';
 
 function getTodayIso() {
   const d = new Date();
@@ -72,6 +72,8 @@ function extractCoordsFromAnyShape(obj, outList) {
       if (obj.geometry) extractCoordsFromAnyShape(obj.geometry, outList);
       if (obj.polygon) extractCoordsFromAnyShape(obj.polygon, outList);
       if (obj.geom) extractCoordsFromAnyShape(obj.geom, outList);
+      if (obj.polygon_coords) extractCoordsFromAnyShape(obj.polygon_coords, outList);
+      if (obj.line_coords) extractCoordsFromAnyShape(obj.line_coords, outList);
     }
   }
 }
@@ -133,9 +135,9 @@ function getReferenceStreetsForSubs(subIds) {
     let pt = null;
     let isHorizontal = null;
 
-    if (Array.isArray(f.geometry) && f.geometry.length >= 2) {
-      const p0 = f.geometry[0];
-      const p1 = f.geometry[f.geometry.length - 1];
+    if (Array.isArray(f.line_coords) && f.line_coords.length >= 2) {
+      const p0 = f.line_coords[0];
+      const p1 = f.line_coords[f.line_coords.length - 1];
       const lat0 = Array.isArray(p0) ? Number(p0[0]) : Number(p0.lat);
       const lng0 = Array.isArray(p0) ? Number(p0[1]) : Number(p0.lng);
       const lat1 = Array.isArray(p1) ? Number(p1[0]) : Number(p1.lat);
@@ -253,23 +255,28 @@ export async function loadStatistics() {
   const fromIsoStart = `${filterFrom}T00:00:00.000Z`;
   const toIsoEnd = `${filterTo}T23:59:59.999Z`;
 
-  // 1. Todos los timbres activos de la congregación
-  const { data: apts } = await supabase
-    .from('terr_apartments')
-    .select('id, building_id, status, last_visited_at')
-    .eq('congregation_id', state.congregation.id)
-    .eq('status', 'active');
+  // 1. Todos los timbres activos de la congregación (paginado completo >1000 filas)
+  const allApts = await fetchAllRows(() =>
+    supabase
+      .from('terr_apartments')
+      .select('id, building_id, status, last_visited_at')
+      .eq('congregation_id', state.congregation.id)
+      .eq('status', 'active')
+      .order('id', { ascending: true })
+  );
 
-  const allApts = apts || [];
   const activeAptIds = new Set(allApts.map((a) => a.id));
 
-  // 2. Logs de timbres tocados en el rango de fechas (sin importar el tipo de resultado)
-  const { data: logs } = await supabase
-    .from('terr_apartment_logs')
-    .select('apartment_id, created_at')
-    .eq('congregation_id', state.congregation.id)
-    .gte('created_at', fromIsoStart)
-    .lte('created_at', toIsoEnd);
+  // 2. Logs de timbres tocados en el rango de fechas (paginado completo >1000 filas)
+  const logs = await fetchAllRows(() =>
+    supabase
+      .from('terr_apartment_logs')
+      .select('apartment_id, created_at')
+      .eq('congregation_id', state.congregation.id)
+      .gte('created_at', fromIsoStart)
+      .lte('created_at', toIsoEnd)
+      .order('id', { ascending: true })
+  );
 
   const touchedAptIdsInRange = new Set();
   (logs || []).forEach((l) => {
