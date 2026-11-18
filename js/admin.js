@@ -1240,6 +1240,28 @@ function bindPolygonMapperEvents(container, onDataChanged) {
       polyStreetNames = parsedStreets;
     }
 
+    // Validación para evitar desfase entre cantidad de lados y nombres de calles en manzanas
+    if (
+      entityType === 'block' &&
+      polyStreetNames.length > 0 &&
+      polyStreetNames.length !== polyPreviewCoords.length
+    ) {
+      const proceed = confirm(
+        `El polígono tiene ${polyPreviewCoords.length} lados pero ingresaste ${polyStreetNames.length} calles.\n` +
+          `Si continuás sin ajustar las ${polyPreviewCoords.length} calles en orden, algunas cuadras quedarán con nombres genéricos ("Cara N").\n\n` +
+          `¿Querés guardar igual? (Cancelar para corregir las calles)`
+      );
+      if (!proceed) {
+        const streetsInput = document.getElementById('poly-streets-input');
+        streetsInput?.focus();
+        showToast(
+          `Ingresá exactamente ${polyPreviewCoords.length} calles en orden alrededor de la manzana`,
+          'warning'
+        );
+        return;
+      }
+    }
+
     const saveBtn = document.getElementById('btn-save-polygon');
     saveBtn.disabled = true;
     saveBtn.textContent = editingPolygonState ? 'Actualizando...' : 'Guardando...';
@@ -1325,6 +1347,8 @@ function bindPolygonMapperEvents(container, onDataChanged) {
       const avgLng =
         polyPreviewCoords.reduce((acc, p) => acc + p[1], 0) / polyPreviewCoords.length;
 
+      const hasExactStreetMatch = polyStreetNames.length === polyPreviewCoords.length;
+
       if (editingPolygonState) {
         const { error: updErr } = await supabase
           .from('terr_blocks')
@@ -1353,10 +1377,9 @@ function bindPolygonMapperEvents(container, onDataChanged) {
           for (let i = 0; i < polyPreviewCoords.length; i++) {
             const pt = polyPreviewCoords[i];
             const nextPt = polyPreviewCoords[(i + 1) % polyPreviewCoords.length];
-            const streetLabel =
-              polyStreetNames[(i + 1) % polyStreetNames.length] ||
-              existingFaces[i].street_name ||
-              `Cara ${i + 1}`;
+            const streetLabel = hasExactStreetMatch
+              ? polyStreetNames[(i + 1) % polyStreetNames.length]
+              : existingFaces[i].street_name || `Cara ${i + 1}`;
             await supabase
               .from('terr_block_faces')
               .update({
@@ -1373,8 +1396,9 @@ function bindPolygonMapperEvents(container, onDataChanged) {
 
           const facesPayload = polyPreviewCoords.map((pt, i) => {
             const nextPt = polyPreviewCoords[(i + 1) % polyPreviewCoords.length];
-            const streetLabel =
-              polyStreetNames[(i + 1) % polyStreetNames.length] || `Cara ${i + 1}`;
+            const streetLabel = hasExactStreetMatch
+              ? polyStreetNames[(i + 1) % polyStreetNames.length]
+              : `Cara ${i + 1}`;
             return {
               congregation_id: state.congregation.id,
               block_id: editingPolygonState.id,
@@ -1409,7 +1433,9 @@ function bindPolygonMapperEvents(container, onDataChanged) {
 
         const facesPayload = polyPreviewCoords.map((pt, i) => {
           const nextPt = polyPreviewCoords[(i + 1) % polyPreviewCoords.length];
-          const streetLabel = polyStreetNames[(i + 1) % polyStreetNames.length] || `Cara ${i + 1}`;
+          const streetLabel = hasExactStreetMatch
+            ? polyStreetNames[(i + 1) % polyStreetNames.length]
+            : `Cara ${i + 1}`;
           return {
             congregation_id: state.congregation.id,
             block_id: newBlock.id,
