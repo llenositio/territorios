@@ -24,44 +24,70 @@ import { showToast, escapeHtml } from './ui-helpers.js';
 
 let allCongregations = [];
 let gpsWatchId = null;
+let isBootstrapping = false;
 
 async function bootstrap() {
-  const root = document.getElementById('app-root');
+  if (isBootstrapping) return;
+  isBootstrapping = true;
 
-  // Ruta pública sin login: #/salidas/:slug
-  const hash = window.location.hash || '';
-  if (hash.startsWith('#/salidas/')) {
-    const slug = decodeURIComponent(hash.replace('#/salidas/', '').trim());
-    await renderPublicCartelera(root, slug);
-    return;
+  try {
+    const root = document.getElementById('app-root');
+
+    // Ruta pública sin login: #/salidas/:slug
+    const hash = window.location.hash || '';
+    if (hash.startsWith('#/salidas/')) {
+      const slug = decodeURIComponent(hash.replace('#/salidas/', '').trim());
+      await renderPublicCartelera(root, slug);
+      return;
+    }
+
+    const session = await initAuth();
+    if (!session) {
+      root.innerHTML = renderAuthView();
+      bindAuthEvents(async () => {
+        await bootstrap();
+      });
+      return;
+    }
+
+    if (!state.profile || state.profile.status !== 'approved') {
+      root.innerHTML = renderPendingApprovalView();
+      document.getElementById('btn-logout-pending')?.addEventListener('click', signOutUser);
+      return;
+    }
+
+    if (isSuperadmin()) {
+      const { data } = await supabase
+        .from('congregaciones')
+        .select('id, nombre')
+        .order('nombre', { ascending: true });
+      allCongregations = data || [];
+    }
+
+    await reloadAllData();
+    startGpsWatcher();
+    renderMainShell();
+  } catch (err) {
+    console.error('Error al iniciar la aplicación:', err);
+    const root = document.getElementById('app-root');
+    if (root) {
+      root.innerHTML = `
+        <div class="min-h-screen flex items-center justify-center p-4 bg-slate-100">
+          <div class="bg-white p-6 rounded-2xl shadow max-w-md w-full text-center space-y-3 border border-rose-200">
+            <div class="text-2xl">⚠️</div>
+            <h2 class="text-base font-extrabold text-slate-900">Error al cargar la aplicación</h2>
+            <p class="text-xs text-slate-600">${escapeHtml(err?.message || 'Error inesperado')}</p>
+            <button onclick="location.href=location.pathname"
+              class="bg-blue-900 text-white font-bold px-4 py-2 rounded-xl text-xs">
+              Reintentar
+            </button>
+          </div>
+        </div>
+      `;
+    }
+  } finally {
+    isBootstrapping = false;
   }
-
-  const session = await initAuth();
-  if (!session) {
-    root.innerHTML = renderAuthView();
-    bindAuthEvents(async () => {
-      await bootstrap();
-    });
-    return;
-  }
-
-  if (!state.profile || state.profile.status !== 'approved') {
-    root.innerHTML = renderPendingApprovalView();
-    document.getElementById('btn-logout-pending')?.addEventListener('click', signOutUser);
-    return;
-  }
-
-  if (isSuperadmin()) {
-    const { data } = await supabase
-      .from('congregaciones')
-      .select('id, nombre')
-      .order('nombre', { ascending: true });
-    allCongregations = data || [];
-  }
-
-  await reloadAllData();
-  startGpsWatcher();
-  renderMainShell();
 }
 
 async function reloadAllData() {
@@ -248,9 +274,18 @@ function renderMainShell() {
   } else if (state.currentTab === 'estadisticas' && adminMode) {
     renderEstadisticasView(content);
   } else if (state.currentTab === 'admin' && adminMode) {
-    renderAdminView(content);
+    renderAdminView(content, async () => {
+      await reloadAllData();
+      renderMainShell();
+    });
   }
 }
 
-window.addEventListener('hashchange', bootstrap);
+window.addEventListener('hashchange', () => {
+  const h = window.location.hash || '';
+  if (h.startsWith('#/salidas/') || h === '') {
+    bootstrap();
+  }
+});
+
 bootstrap();
