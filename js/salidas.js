@@ -4,8 +4,30 @@ import { showToast, escapeHtml } from './ui-helpers.js';
 
 let showScheduleModal = false;
 let editingScheduleId = null;
+let prefilledTerritories = '';
 let hermanosList = [];
 let conductoresList = [];
+
+function getDraftProposalTerritories() {
+  if (Array.isArray(state.proposedTerritories) && state.proposedTerritories.length > 0) {
+    return state.proposedTerritories.map(String);
+  }
+  try {
+    const raw = localStorage.getItem('terr_proposed_territories');
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    return Array.isArray(parsed) ? parsed.map(String) : [];
+  } catch {
+    return [];
+  }
+}
+
+function clearDraftProposalTerritories() {
+  state.proposedTerritories = [];
+  try {
+    localStorage.removeItem('terr_proposed_territories');
+  } catch {}
+}
 
 export async function loadSchedulesAndPoints() {
   if (!state.congregation?.id) return;
@@ -134,11 +156,9 @@ function findHermanoRecord(conductorName) {
   const target = normalizeName(conductorName);
   if (!target) return null;
 
-  // 1. Coincidencia exacta normalizada
   let match = hermanosList.find((h) => normalizeName(h.nombre) === target);
   if (match) return match;
 
-  // 2. Coincidencia por tokens (ej: "CLAUDIO LLENOLIO" <-> "LLENOLIO, Claudio")
   const targetTokens = target.split(' ').filter((t) => t.length >= 2);
   if (targetTokens.length >= 2) {
     match = hermanosList.find((h) => {
@@ -148,7 +168,6 @@ function findHermanoRecord(conductorName) {
     if (match) return match;
   }
 
-  // 3. Coincidencia parcial por inclusión
   match = hermanosList.find(
     (h) =>
       normalizeName(h.nombre).includes(target) ||
@@ -185,13 +204,13 @@ function buildScheduleTableHtml(list, { adminMode = false } = {}) {
         <table class="w-full border-collapse text-center text-xs sm:text-[13px]">
           <thead>
             <tr class="bg-[#2b6cb0] text-white font-extrabold tracking-wide uppercase">
-              <th class="py-2.5 px-2 border border-[#1e4e8c]">DÍA</th>
-              <th class="py-2.5 px-2 border border-[#1e4e8c]">HORA</th>
-              <th class="py-2.5 px-2.5 border border-[#1e4e8c]">LUGAR</th>
-              <th class="py-2.5 px-2 border border-[#1e4e8c]">GRUPOS</th>
-              <th class="py-2.5 px-2.5 border border-[#1e4e8c]">CONDUCTOR</th>
-              <th class="py-2.5 px-2 border border-[#1e4e8c]">TERRITORIO</th>
-              ${adminMode ? `<th class="py-2.5 px-2 border border-[#1e4e8c]">ACCIÓN</th>` : ''}
+              <th class="py-2.5 px-2.5 border border-[#1e4e8c] whitespace-nowrap">DÍA</th>
+              <th class="py-2.5 px-2 border border-[#1e4e8c] whitespace-nowrap">HORA</th>
+              <th class="py-2.5 px-4 border border-[#1e4e8c] min-w-[230px] sm:min-w-[270px]">LUGAR</th>
+              <th class="py-2.5 px-2.5 border border-[#1e4e8c] whitespace-nowrap">GRUPOS</th>
+              <th class="py-2.5 px-3 border border-[#1e4e8c] min-w-[140px]">CONDUCTOR</th>
+              <th class="py-2.5 px-2 border border-[#1e4e8c] whitespace-nowrap">TERRITORIO</th>
+              ${adminMode ? `<th class="py-2.5 px-2.5 border border-[#1e4e8c] whitespace-nowrap">ACCIÓN</th>` : ''}
             </tr>
           </thead>
           <tbody>
@@ -207,27 +226,27 @@ function buildScheduleTableHtml(list, { adminMode = false } = {}) {
 
                 return `
                   <tr class="${rowBg} text-slate-900">
-                    <td class="py-2.5 px-2 border border-slate-300 font-extrabold whitespace-nowrap">
+                    <td class="py-2.5 px-2.5 border border-slate-300 font-extrabold whitespace-nowrap">
                       ${escapeHtml(dayLabel)}
                     </td>
                     <td class="py-2.5 px-2 border border-slate-300 font-extrabold whitespace-nowrap">
                       ${escapeHtml(timeLabel)}
                     </td>
-                    <td class="py-2.5 px-2.5 border border-slate-300 font-semibold leading-snug">
+                    <td class="py-2.5 px-4 border border-slate-300 font-semibold leading-snug min-w-[230px] sm:min-w-[270px]">
                       ${escapeHtml(placeLabel)}
                     </td>
-                    <td class="py-2.5 px-2 border border-slate-300 font-semibold">
+                    <td class="py-2.5 px-2.5 border border-slate-300 font-semibold whitespace-nowrap">
                       ${escapeHtml(groupsLabel)}
                     </td>
-                    <td class="py-2.5 px-2.5 border border-slate-300 font-semibold">
+                    <td class="py-2.5 px-3 border border-slate-300 font-semibold min-w-[140px]">
                       ${escapeHtml(conductorLabel)}
                     </td>
-                    <td class="py-2.5 px-2 border border-slate-300 font-extrabold">
+                    <td class="py-2.5 px-2 border border-slate-300 font-extrabold whitespace-nowrap">
                       ${escapeHtml(terrLabel)}
                     </td>
                     ${
                       adminMode
-                        ? `<td class="py-2 px-2 border border-slate-300 whitespace-nowrap">
+                        ? `<td class="py-2 px-2.5 border border-slate-300 whitespace-nowrap">
                             <div class="inline-flex items-center justify-center gap-1.5">
                               <button data-sched-id="${s.id}"
                                 class="send-wa-btn inline-flex items-center justify-center w-8 h-8 rounded-full border-2 border-[#25D366] text-[#128C7E] bg-white hover:bg-[#25D366] hover:text-white transition shadow-xs"
@@ -263,9 +282,31 @@ export function renderSalidasView(container) {
   const adminMode = isAdmin();
   const publicSlug = state.settings?.slug || '';
   const publicUrl = `${window.location.origin}${window.location.pathname}#/salidas/${publicSlug}`;
+  const draftTerrs = getDraftProposalTerritories();
 
   container.innerHTML = `
     <div class="space-y-4 pb-24 w-full">
+      ${
+        adminMode && draftTerrs.length > 0
+          ? `<div class="bg-amber-50 border border-amber-300 p-3.5 rounded-2xl shadow-sm flex flex-wrap items-center justify-between gap-2">
+              <div class="text-xs text-amber-950">
+                <span class="font-extrabold">📌 Propuesta desde Avance:</span>
+                Territorios <b>${escapeHtml(draftTerrs.join(', '))}</b> listos para asignar.
+              </div>
+              <div class="flex items-center gap-2">
+                <button id="btn-use-draft-terrs"
+                  class="bg-amber-600 hover:bg-amber-700 text-white font-bold px-3 py-1.5 rounded-xl text-xs shadow-xs">
+                  + Programar con estos
+                </button>
+                <button id="btn-clear-draft-terrs"
+                  class="bg-white hover:bg-amber-100 text-amber-900 font-semibold px-2.5 py-1.5 rounded-xl text-xs border border-amber-300">
+                  Descartar
+                </button>
+              </div>
+            </div>`
+          : ''
+      }
+
       ${
         adminMode
           ? `<div class="bg-white p-4 rounded-2xl shadow-sm border border-slate-200 space-y-3">
@@ -296,8 +337,21 @@ export function renderSalidasView(container) {
   `;
 
   if (adminMode) {
+    document.getElementById('btn-use-draft-terrs')?.addEventListener('click', () => {
+      editingScheduleId = null;
+      prefilledTerritories = draftTerrs.join(', ');
+      showScheduleModal = true;
+      renderSalidasView(container);
+    });
+
+    document.getElementById('btn-clear-draft-terrs')?.addEventListener('click', () => {
+      clearDraftProposalTerritories();
+      renderSalidasView(container);
+    });
+
     document.getElementById('btn-new-schedule').onclick = () => {
       editingScheduleId = null;
+      prefilledTerritories = draftTerrs.join(', ');
       showScheduleModal = true;
       renderSalidasView(container);
     };
@@ -310,6 +364,7 @@ export function renderSalidasView(container) {
     document.querySelectorAll('.edit-sched-btn').forEach((btn) => {
       btn.onclick = () => {
         editingScheduleId = btn.getAttribute('data-edit-sched');
+        prefilledTerritories = '';
         showScheduleModal = true;
         renderSalidasView(container);
       };
@@ -337,7 +392,6 @@ export function renderSalidasView(container) {
 
       const phone = findConductorPhone(item.conductor_name);
 
-      // Convierte "LLENOLIO, Mónica" en "Mónica Llenolio" para un saludo natural
       let displayName = (item.conductor_name || '').trim();
       if (displayName.includes(',')) {
         const [apellido, nombre] = displayName.split(',').map((s) => s.trim());
@@ -393,7 +447,7 @@ function renderScheduleModalHtml() {
   const placeVal = editingItem?.meeting_point_text || '';
   const conductorVal = editingItem?.conductor_name || '';
   const groupsVal = editingItem ? (editingItem.groups_assigned || '') : 'CONGREGACIONAL';
-  const terrsVal = editingItem?.assigned_subterritories || '';
+  const terrsVal = editingItem ? (editingItem.assigned_subterritories || '') : prefilledTerritories;
   const isSpecial = Boolean(editingItem?.is_special_event);
 
   return `
@@ -502,6 +556,7 @@ function bindScheduleModalEvents(container) {
   document.getElementById('close-sched-modal').onclick = () => {
     showScheduleModal = false;
     editingScheduleId = null;
+    prefilledTerritories = '';
     renderSalidasView(container);
   };
 
@@ -547,6 +602,7 @@ function bindScheduleModalEvents(container) {
       state.schedules.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
       showScheduleModal = false;
       editingScheduleId = null;
+      prefilledTerritories = '';
       showToast('Salida actualizada correctamente', 'success');
       renderSalidasView(container);
       return;
@@ -565,8 +621,10 @@ function bindScheduleModalEvents(container) {
 
     state.schedules.push(data);
     state.schedules.sort((a, b) => (a.date + a.time).localeCompare(b.date + b.time));
+    clearDraftProposalTerritories();
     showScheduleModal = false;
     editingScheduleId = null;
+    prefilledTerritories = '';
     showToast('Salida programada correctamente', 'success');
     renderSalidasView(container);
   };
