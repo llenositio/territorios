@@ -11,6 +11,7 @@ import {
 
 let selectedSubterritoryId = 'ALL';
 let leafletMap = null;
+let userLocationMarker = null;
 let showDnvModal = false;
 let isMapExpanded = false;
 
@@ -23,6 +24,7 @@ let shouldFitBoundsNextRender = true;
 let realtimeChannel = null;
 let activeManzanasContainer = null;
 let visibilityListenerAttached = false;
+let locationListenerAttached = false;
 
 function canMarkTerritory() {
   const role = state.profile?.role;
@@ -69,6 +71,24 @@ export async function loadBlocksAndFaces() {
   if (!blkRes.error) state.blocks = blkRes.data || [];
   if (!faceRes.error) state.blockFaces = faceRes.data || [];
   if (!dnvRes.error) state.dnvHouses = dnvRes.data || [];
+}
+
+function updateLiveUserMarker(loc) {
+  if (!leafletMap || !loc || typeof window.L === 'undefined') return;
+  const latLng = [loc.lat, loc.lng];
+  if (userLocationMarker) {
+    userLocationMarker.setLatLng(latLng);
+  } else {
+    userLocationMarker = window.L.circleMarker(latLng, {
+      radius: 7,
+      color: '#ffffff',
+      weight: 2,
+      fillColor: '#2563eb',
+      fillOpacity: 1
+    })
+      .addTo(leafletMap)
+      .bindPopup('Tu ubicación actual');
+  }
 }
 
 function setupLiveSync(container) {
@@ -118,6 +138,14 @@ function setupLiveSync(container) {
         await loadBlocksAndFaces();
         renderManzanasView(activeManzanasContainer, { skipFetch: true });
       }
+    });
+  }
+
+  // 3. Mover el punto azul en vivo al caminar sin recargar el mapa
+  if (!locationListenerAttached) {
+    locationListenerAttached = true;
+    window.addEventListener('user-location-updated', (e) => {
+      updateLiveUserMarker(e.detail || state.userLocation);
     });
   }
 }
@@ -189,7 +217,7 @@ export function renderManzanasView(container, options = {}) {
   if (!state.userLocation) {
     requestOnDemandGps({
       silent: true,
-      onSuccess: () => renderManzanasView(container, { skipFetch: true })
+      onSuccess: (loc) => updateLiveUserMarker(loc)
     });
   }
 
@@ -305,7 +333,6 @@ export function renderManzanasView(container, options = {}) {
                           </span>
                         </div>
                       </div>
-
                       ${
                         editable
                           ? `<button data-face-id="${face.id}"
@@ -369,6 +396,7 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
     savedMapZoom = leafletMap.getZoom();
     leafletMap.remove();
     leafletMap = null;
+    userLocationMarker = null;
   }
 
   const defaultLat = savedMapCenter?.lat || state.userLocation?.lat || -38.0055;
@@ -541,15 +569,7 @@ function initLeafletMap(container, subterritories, blocks, faces, editable) {
   });
 
   if (state.userLocation) {
-    window.L.circleMarker([state.userLocation.lat, state.userLocation.lng], {
-      radius: 7,
-      color: '#ffffff',
-      weight: 2,
-      fillColor: '#2563eb',
-      fillOpacity: 1
-    })
-      .addTo(leafletMap)
-      .bindPopup('Tu ubicación actual');
+    updateLiveUserMarker(state.userLocation);
   }
 
   if (shouldFitBoundsNextRender && bounds.length > 0) {
