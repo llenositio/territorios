@@ -107,7 +107,7 @@ async function reloadAllData() {
   await Promise.all(tasks);
 }
 
-// GPS en segundo plano solo para alertas pasivas de casas "No Visitar"
+// GPS en tiempo real para ubicar al usuario en los mapas y alertas de casas "No Visitar"
 function startGpsWatcher() {
   if (!navigator.geolocation || gpsWatchId !== null) return;
   gpsWatchId = navigator.geolocation.watchPosition(
@@ -116,10 +116,13 @@ function startGpsWatcher() {
         lat: pos.coords.latitude,
         lng: pos.coords.longitude
       };
+      window.dispatchEvent(
+        new CustomEvent('user-location-updated', { detail: state.userLocation })
+      );
       checkDnvProximityAlert(pos.coords.latitude, pos.coords.longitude);
     },
     () => {},
-    { enableHighAccuracy: false, maximumAge: 60000, timeout: 15000 }
+    { enableHighAccuracy: true, maximumAge: 5000, timeout: 15000 }
   );
 }
 
@@ -136,6 +139,9 @@ export function requestOnDemandGps({ silent = false, onSuccess = null } = {}) {
         lat: pos.coords.latitude,
         lng: pos.coords.longitude
       };
+      window.dispatchEvent(
+        new CustomEvent('user-location-updated', { detail: state.userLocation })
+      );
       checkDnvProximityAlert(pos.coords.latitude, pos.coords.longitude);
       if (onSuccess) onSuccess(state.userLocation);
     },
