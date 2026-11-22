@@ -1,6 +1,6 @@
 export const state = {
   authUser: null,        // Usuario autenticado de Supabase Auth
-  profile: null,         // Fila en public.terr_users (role, status, congregation_id)
+  profile: null,         // Fila normalizada de public.perfiles (role, status, congregation_id)
   congregation: null,    // { id, nombre } de public.congregaciones
   settings: null,        // Fila de public.terr_congregation_settings
   currentTab: 'edificios',
@@ -16,19 +16,34 @@ export const state = {
 };
 
 export function isSuperadmin() {
-  return state.profile?.role === 'superadmin' && state.profile?.status === 'approved';
+  const r = state.profile?.role;
+  return (r === 'super_admin' || r === 'superadmin') && state.profile?.status === 'approved';
 }
 
 export function isAdmin() {
+  const r = state.profile?.role;
   return (
-    (state.profile?.role === 'admin' || state.profile?.role === 'superadmin') &&
+    ['super_admin', 'superadmin', 'admin_congregacion', 'admin', 'editor_territorios'].includes(r) &&
     state.profile?.status === 'approved'
   );
 }
 
 export function isConductorOrAdmin() {
+  const r = state.profile?.role;
   return (
-    ['conductor', 'admin', 'superadmin'].includes(state.profile?.role) &&
+    [
+      'super_admin',
+      'superadmin',
+      'admin_congregacion',
+      'admin',
+      'editor_territorios',
+      'conductor'
+    ].includes(r) &&
     state.profile?.status === 'approved'
   );
+}
+
+export function isMensajeroTerritorios() {
+  const r = state.profile?.role;
+  return r === 'mensajero_territorios' && state.profile?.status === 'approved';
 }
