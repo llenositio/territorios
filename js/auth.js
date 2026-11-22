@@ -13,50 +13,80 @@ export async function loadUserSession() {
   }
 
   state.authUser = session.user;
-  const userEmail = session.user.email.toLowerCase();
+  const userEmail = (session.user.email || '').toLowerCase();
 
-  // Buscar perfil exclusivo en terr_users (aislado de public.perfiles)
-  const { data: profiles, error } = await supabase
-    .from('terr_users')
+  // Leer perfil unificado en public.perfiles
+  let { data: profileRow, error } = await supabase
+    .from('perfiles')
     .select('*, congregaciones(id, nombre)')
-    .ilike('email', userEmail);
+    .eq('id', session.user.id)
+    .maybeSingle();
+
+  // Si aún no existía fila en public.perfiles, crearla en estado pending (o super_admin si corresponde)
+  if (!profileRow && !error) {
+    const esSuper = userEmail === 'claudiollenolio@gmail.com';
+    const nuevoPerfil = {
+      id: session.user.id,
+      email: userEmail,
+      full_name: session.user.user_metadata?.full_name || userEmail.split('@')[0],
+      role: esSuper ? 'super_admin' : 'publicador',
+      status: esSuper ? 'approved' : 'pending',
+      congregacion_id: null
+    };
+    const resInsert = await supabase
+      .from('perfiles')
+      .upsert(nuevoPerfil)
+      .select('*, congregaciones(id, nombre)')
+      .single();
+
+    profileRow = resInsert.data;
+    error = resInsert.error;
+  }
 
   if (error) {
-    console.error('Error leyendo terr_users:', error);
+    console.error('Error leyendo public.perfiles:', error);
     return { status: 'error', message: error.message };
   }
 
-  if (!profiles || profiles.length === 0) {
+  if (!profileRow) {
     return { status: 'no_profile' };
   }
 
-  // Priorizar superadmin o aprobado si hubiera más de un registro
-  const activeProfile =
-    profiles.find((p) => p.role === 'superadmin' && p.status === 'approved') ||
-    profiles.find((p) => p.status === 'approved') ||
-    profiles[0];
+  // Normalizar campos para mantener compatibilidad total con toda la app de Territorios
+  const normalizedProfile = {
+    ...profileRow,
+    congregation_id: profileRow.congregacion_id || null,
+    role: profileRow.role || profileRow.rol || 'publicador',
+    status: profileRow.status || 'pending'
+  };
 
-  // Vincular user_id si todavía estaba nulo
-  if (!activeProfile.user_id && session.user.id) {
-    await supabase
-      .from('terr_users')
-      .update({ user_id: session.user.id })
-      .eq('id', activeProfile.id);
+  // Si el usuario todavía no eligió congregación (y no es super_admin), mostrar selector de solicitud
+  if (
+    normalizedProfile.role !== 'super_admin' &&
+    normalizedProfile.role !== 'superadmin' &&
+    !normalizedProfile.congregation_id
+  ) {
+    state.profile = normalizedProfile;
+    return { status: 'no_profile', profile: normalizedProfile };
   }
 
-  state.profile = activeProfile;
-  state.congregation = activeProfile.congregaciones || null;
+  state.profile = normalizedProfile;
+  state.congregation = profileRow.congregaciones || null;
 
-  // Si es superadmin sin congregación fija, cargar la primera disponible
-  if (activeProfile.role === 'superadmin' && !state.congregation) {
-    const { data: firstSettings } = await supabase
-      .from('terr_congregation_settings')
-      .select('congregation_id, congregaciones(id, nombre)')
+  // Si es super_admin sin congregación fija, cargar la primera congregación disponible
+  if (
+    (normalizedProfile.role === 'super_admin' || normalizedProfile.role === 'superadmin') &&
+    !state.congregation
+  ) {
+    const { data: firstCong } = await supabase
+      .from('congregaciones')
+      .select('id, nombre')
+      .order('nombre', { ascending: true })
       .limit(1)
       .maybeSingle();
 
-    if (firstSettings?.congregaciones) {
-      state.congregation = firstSettings.congregaciones;
+    if (firstCong) {
+      state.congregation = firstCong;
     }
   }
 
@@ -69,7 +99,12 @@ export async function loadUserSession() {
     state.settings = settings;
   }
 
-  return { status: activeProfile.status, profile: activeProfile };
+  const effectiveStatus =
+    normalizedProfile.role === 'super_admin' || normalizedProfile.role === 'superadmin'
+      ? 'approved'
+      : normalizedProfile.status;
+
+  return { status: effectiveStatus, profile: normalizedProfile };
 }
 
 export async function signInWithGoogle() {
@@ -85,22 +120,6 @@ export async function signInWithGoogle() {
   }
 }
 
-export async function signInAdmin(usernameOrEmail, password) {
-  let loginEmail = usernameOrEmail.trim().toLowerCase();
-  if (!loginEmail.includes('@')) {
-    loginEmail = `${loginEmail}@terr.local`;
-  }
-
-  const { error } = await supabase.auth.signInWithPassword({
-    email: loginEmail,
-    password
-  });
-
-  if (error) {
-    throw new Error('Usuario o contraseña incorrectos');
-  }
-}
-
 export async function signOut() {
   await supabase.auth.signOut();
   state.authUser = null;
@@ -110,7 +129,7 @@ export async function signOut() {
   window.location.reload();
 }
 
-export function renderLoginScreen(container, onSuccess) {
+export function renderLoginScreen(container) {
   container.innerHTML = `
     <div class="min-h-screen flex flex-col justify-center items-center px-4 bg-gradient-to-b from-blue-950 via-blue-900 to-slate-900 text-white">
       <div class="w-full max-w-sm bg-white text-slate-900 rounded-3xl shadow-2xl p-7">
@@ -133,67 +152,27 @@ export function renderLoginScreen(container, onSuccess) {
           <span>Continuar con Google</span>
         </button>
 
-        <div class="mt-6 pt-5 border-t border-slate-100 text-center">
-          <button id="toggle-admin-login" class="text-xs font-semibold text-slate-400 hover:text-blue-800 transition">
-            Acceso Administradores ▾
-          </button>
-
-          <form id="admin-login-form" class="hidden mt-4 space-y-3 text-left">
-            <div>
-              <label class="block text-xs font-bold text-slate-600 mb-1">Usuario o Email</label>
-              <input type="text" id="admin-user-input" required placeholder="ej: admin_vdp"
-                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-blue-800 outline-none" />
-            </div>
-            <div>
-              <label class="block text-xs font-bold text-slate-600 mb-1">Contraseña</label>
-              <input type="password" id="admin-pass-input" required placeholder="••••••••"
-                class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm focus:ring-2 focus:ring-blue-800 outline-none" />
-            </div>
-            <button type="submit" id="btn-admin-submit"
-              class="w-full bg-blue-900 hover:bg-blue-800 text-white font-bold py-3 rounded-xl text-sm shadow transition">
-              Ingresar al Panel
-            </button>
-          </form>
-        </div>
+        <p class="mt-5 text-center text-xs text-slate-400">
+          Acceso unificado con tu cuenta de Google. Si es tu primera vez, podrás solicitar ingreso a tu congregación.
+        </p>
       </div>
     </div>
   `;
 
   document.getElementById('btn-google-login').onclick = signInWithGoogle;
-
-  document.getElementById('toggle-admin-login').onclick = () => {
-    document.getElementById('admin-login-form').classList.toggle('hidden');
-  };
-
-  document.getElementById('admin-login-form').onsubmit = async (e) => {
-    e.preventDefault();
-    const btn = document.getElementById('btn-admin-submit');
-    const userVal = document.getElementById('admin-user-input').value;
-    const passVal = document.getElementById('admin-pass-input').value;
-
-    btn.disabled = true;
-    btn.textContent = 'Verificando...';
-    try {
-      await signInAdmin(userVal, passVal);
-      await onSuccess();
-    } catch (err) {
-      showToast(err.message, 'error');
-      btn.disabled = false;
-      btn.textContent = 'Ingresar al Panel';
-    }
-  };
 }
 
 export async function renderCongregationRequestScreen(container, onSubmitted) {
-  const { data: activeSettings } = await supabase
-    .from('terr_congregation_settings')
-    .select('congregation_id, congregaciones(id, nombre)');
+  const { data: activeCongs } = await supabase
+    .from('congregaciones')
+    .select('id, nombre, ciudad')
+    .eq('activa', true)
+    .order('nombre', { ascending: true });
 
-  const congregations = (activeSettings || [])
-    .map((s) => s.congregaciones)
-    .filter(Boolean);
+  const congregations = activeCongs || [];
 
   const defaultName =
+    state.profile?.full_name ||
     state.authUser?.user_metadata?.full_name ||
     state.authUser?.email?.split('@')[0] ||
     '';
@@ -219,7 +198,12 @@ export async function renderCongregationRequestScreen(container, onSubmitted) {
               class="w-full px-3.5 py-2.5 rounded-xl border border-slate-300 text-sm bg-white">
               <option value="">-- Elegir congregación --</option>
               ${congregations
-                .map((c) => `<option value="${c.id}">${escapeHtml(c.nombre)}</option>`)
+                .map(
+                  (c) =>
+                    `<option value="${c.id}">${escapeHtml(c.nombre)}${
+                      c.ciudad ? ` (${escapeHtml(c.ciudad)})` : ''
+                    }</option>`
+                )
                 .join('')}
             </select>
           </div>
@@ -231,7 +215,7 @@ export async function renderCongregationRequestScreen(container, onSubmitted) {
         </form>
 
         <button id="btn-logout-req" class="w-full mt-4 text-xs text-slate-400 hover:text-slate-600">
-          Cerrar sesión (${escapeHtml(state.authUser?.email)})
+          Cerrar sesión (${escapeHtml(state.authUser?.email || '')})
         </button>
       </div>
     </div>
@@ -249,14 +233,16 @@ export async function renderCongregationRequestScreen(container, onSubmitted) {
     btn.disabled = true;
     btn.textContent = 'Enviando...';
 
-    const { error } = await supabase.from('terr_users').insert({
-      user_id: state.authUser.id,
-      congregation_id: congId,
-      email: state.authUser.email.toLowerCase(),
-      full_name: fullName,
-      role: 'publicador',
-      status: 'pending'
-    });
+    const { error } = await supabase
+      .from('perfiles')
+      .upsert({
+        id: state.authUser.id,
+        email: state.authUser.email.toLowerCase(),
+        full_name: fullName,
+        congregacion_id: congId,
+        role: 'publicador',
+        status: 'pending'
+      });
 
     if (error) {
       showToast('Error al enviar solicitud: ' + error.message, 'error');
