@@ -18,9 +18,10 @@ export async function loadAdminData() {
 
   const [usersRes, repRes, hermRes] = await Promise.all([
     supabase
-      .from('terr_users')
+      .from('perfiles')
       .select('*')
-      .eq('congregation_id', state.congregation.id)
+      .eq('congregacion_id', state.congregation.id)
+      .neq('role', 'super_admin')
       .order('created_at', { ascending: false }),
     supabase
       .from('terr_new_building_reports')
