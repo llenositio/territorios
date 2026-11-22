@@ -1,5 +1,5 @@
 import { supabase } from './supabase.js';
-import { state, isAdmin } from './state.js';
+import { state, isAdmin, isMensajeroTerritorios } from './state.js';
 import { showToast, escapeHtml } from './ui-helpers.js';
 
 let showScheduleModal = false;
@@ -51,11 +51,11 @@ export async function loadSchedulesAndPoints() {
       .eq('congregacion_id', state.congregation.id)
       .order('nombre', { ascending: true }),
     supabase
-      .from('terr_users')
+      .from('perfiles')
       .select('id, full_name, role, status')
-      .eq('congregation_id', state.congregation.id)
+      .eq('congregacion_id', state.congregation.id)
       .eq('status', 'approved')
-      .in('role', ['conductor', 'admin'])
+      .in('role', ['conductor', 'editor_territorios', 'admin_congregacion', 'admin', 'super_admin'])
   ]);
 
   if (!schedRes.error) state.schedules = schedRes.data || [];
@@ -190,13 +190,15 @@ function getWhatsAppSvgIcon() {
   `;
 }
 
-function buildScheduleTableHtml(list, { adminMode = false } = {}) {
+function buildScheduleTableHtml(list, { adminMode = false, canWhatsApp = false } = {}) {
   if (!list || list.length === 0) {
     return `
       <div class="bg-white p-8 rounded-2xl text-center text-slate-500 border border-slate-200">
         <p class="font-semibold">No hay salidas programadas próximamente</p>
       </div>`;
   }
+
+  const showActionCol = adminMode || canWhatsApp;
 
   return `
     <div class="w-full bg-white rounded-2xl shadow-sm border border-slate-300 overflow-hidden">
@@ -210,7 +212,7 @@ function buildScheduleTableHtml(list, { adminMode = false } = {}) {
               <th class="py-2.5 px-2.5 border border-[#1e4e8c] whitespace-nowrap">GRUPOS</th>
               <th class="py-2.5 px-3 border border-[#1e4e8c] min-w-[140px]">CONDUCTOR</th>
               <th class="py-2.5 px-2 border border-[#1e4e8c] whitespace-nowrap">TERRITORIO</th>
-              ${adminMode ? `<th class="py-2.5 px-2.5 border border-[#1e4e8c] whitespace-nowrap">ACCIÓN</th>` : ''}
+              ${showActionCol ? `<th class="py-2.5 px-2.5 border border-[#1e4e8c] whitespace-nowrap">ACCIÓN</th>` : ''}
             </tr>
           </thead>
           <tbody>
@@ -245,7 +247,7 @@ function buildScheduleTableHtml(list, { adminMode = false } = {}) {
                       ${escapeHtml(terrLabel)}
                     </td>
                     ${
-                      adminMode
+                      showActionCol
                         ? `<td class="py-2 px-2.5 border border-slate-300 whitespace-nowrap">
                             <div class="inline-flex items-center justify-center gap-1.5">
                               <button data-sched-id="${s.id}"
@@ -253,16 +255,20 @@ function buildScheduleTableHtml(list, { adminMode = false } = {}) {
                                 title="Enviar WhatsApp al conductor">
                                 ${getWhatsAppSvgIcon()}
                               </button>
-                              <button data-edit-sched="${s.id}"
-                                class="edit-sched-btn inline-flex items-center justify-center w-8 h-8 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold text-sm transition"
-                                title="Editar salida">
-                                ✎
-                              </button>
-                              <button data-del-sched="${s.id}"
-                                class="del-sched-btn inline-flex items-center justify-center w-8 h-8 rounded-lg bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold text-xs transition"
-                                title="Eliminar fila">
-                                ✕
-                              </button>
+                              ${
+                                adminMode
+                                  ? `<button data-edit-sched="${s.id}"
+                                      class="edit-sched-btn inline-flex items-center justify-center w-8 h-8 rounded-lg bg-amber-100 hover:bg-amber-200 text-amber-800 font-bold text-sm transition"
+                                      title="Editar salida">
+                                      ✎
+                                    </button>
+                                    <button data-del-sched="${s.id}"
+                                      class="del-sched-btn inline-flex items-center justify-center w-8 h-8 rounded-lg bg-rose-100 hover:bg-rose-200 text-rose-700 font-bold text-xs transition"
+                                      title="Eliminar fila">
+                                      ✕
+                                    </button>`
+                                  : ''
+                              }
                             </div>
                           </td>`
                         : ''
@@ -280,6 +286,7 @@ function buildScheduleTableHtml(list, { adminMode = false } = {}) {
 
 export function renderSalidasView(container) {
   const adminMode = isAdmin();
+  const canWhatsApp = adminMode || isMensajeroTerritorios();
   const publicSlug = state.settings?.slug || '';
   const publicUrl = `${window.location.origin}${window.location.pathname}#/salidas/${publicSlug}`;
   const draftTerrs = getDraftProposalTerritories();
@@ -331,7 +338,7 @@ export function renderSalidasView(container) {
           : ''
       }
 
-      ${buildScheduleTableHtml(state.schedules, { adminMode })}
+      ${buildScheduleTableHtml(state.schedules, { adminMode, canWhatsApp })}
     </div>
     ${showScheduleModal ? renderScheduleModalHtml() : ''}
   `;
