@@ -11,8 +11,12 @@ export const state = {
   blockFaces: [],
   buildings: [],
   dnvHouses: [],
+  telephones: [],
+  reviewItems: [],
+  reviewAlertsCount: { yellow: 0, red: 0 },
   meetingPoints: [],
-  schedules: []
+  schedules: [],
+  proposedTerritories: []
 };
 
 export function isSuperadmin() {
@@ -21,6 +25,14 @@ export function isSuperadmin() {
 }
 
 export function isAdmin() {
+  const r = state.profile?.role;
+  return (
+    ['super_admin', 'superadmin', 'admin_congregacion', 'admin', 'editor_territorios'].includes(r) &&
+    state.profile?.status === 'approved'
+  );
+}
+
+export function canManageAnnualReviews() {
   const r = state.profile?.role;
   return (
     ['super_admin', 'superadmin', 'admin_congregacion', 'admin', 'editor_territorios'].includes(r) &&
