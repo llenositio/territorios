@@ -374,9 +374,19 @@ async function handleApartmentAction(aptId, action, container) {
     const skip10Min = new Date(Date.now() + 10 * 60 * 1000).toISOString();
     updatePayload = { skipped_until: skip10Min };
   } else if (action === 'do_not_visit') {
-    updatePayload = { status: 'do_not_visit' };
+    updatePayload = {
+      status: 'do_not_visit',
+      status_changed_at: nowIso,
+      status_changed_by: state.profile.id,
+      last_ratified_at: nowIso
+    };
   } else if (action === 'does_not_exist') {
-    updatePayload = { status: 'does_not_exist' };
+    updatePayload = {
+      status: 'does_not_exist',
+      status_changed_at: nowIso,
+      status_changed_by: state.profile.id,
+      last_ratified_at: nowIso
+    };
   }
 
   const { error } = await supabase
