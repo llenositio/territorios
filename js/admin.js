@@ -1,155 +1,140 @@
-import { supabase } from './supabase.js';
-import { state, isSuperadmin } from './state.js';
-import { escapeHtml } from './ui-helpers.js';
-import { renderGeneralAdminHtml, bindGeneralAdminEvents } from './admin-general.js';
-import { renderPolygonMapperHtml, bindPolygonMapperEvents } from './admin-poligonos.js';
-import { renderUsersAdminHtml, bindUsersAdminEvents } from './admin-usuarios.js';
-import { renderBuildingsAdminHtml, bindBuildingsAdminEvents } from './admin-edificios.js';
+import { state, isSuperadmin, canManageAnnualReviews } from './state.js';
+import { renderImportadorHtml, bindImportadorEvents } from './importador.js';
+import {
+  loadBuildingsAdminData,
+  renderBuildingsAdminHtml,
+  bindBuildingsAdminEvents
+} from './admin-edificios.js';
+import {
+  loadPolygonsAdminData,
+  renderPolygonsAdminHtml,
+  bindPolygonsAdminEvents
+} from './admin-poligonos.js';
+import {
+  loadUsersAdminData,
+  renderUsersAdminHtml,
+  bindUsersAdminEvents
+} from './admin-usuarios.js';
+import {
+  loadGeneralAdminData,
+  renderGeneralAdminHtml,
+  bindGeneralAdminEvents
+} from './admin-general.js';
+import {
+  loadAnnualReviewData,
+  renderRevisionAnualView
+} from './revision-anual.js';
 
-let pendingUsers = [];
-let allCongUsers = [];
-let pendingReports = [];
-let congregationsList = [];
-let hermanosCongList = [];
-let adminSubTab = 'general';
+let activeAdminSubtab = 'edificios';
 
 export async function loadAdminData() {
   if (!state.congregation?.id) return;
-
-  const [usersRes, repRes, hermRes] = await Promise.all([
-    supabase
-      .from('perfiles')
-      .select('*')
-      .eq('congregacion_id', state.congregation.id)
-      .neq('role', 'super_admin')
-      .order('created_at', { ascending: false }),
-    supabase
-      .from('terr_new_building_reports')
-      .select('*')
-      .eq('congregation_id', state.congregation.id)
-      .eq('status', 'pending')
-      .order('created_at', { ascending: false }),
-    supabase
-      .from('hermanos')
-      .select('id, nombre, celular')
-      .eq('congregacion_id', state.congregation.id)
-      .order('nombre', { ascending: true })
-  ]);
-
-  if (!usersRes.error) {
-    allCongUsers = usersRes.data || [];
-    pendingUsers = allCongUsers.filter((u) => u.status === 'pending');
+  const tasks = [
+    loadBuildingsAdminData(),
+    loadPolygonsAdminData(),
+    loadUsersAdminData(),
+    loadGeneralAdminData()
+  ];
+  if (canManageAnnualReviews()) {
+    tasks.push(loadAnnualReviewData());
   }
-  if (!repRes.error) {
-    pendingReports = repRes.data || [];
-  }
-  if (!hermRes.error) {
-    hermanosCongList = hermRes.data || [];
-  }
-
-  if (isSuperadmin()) {
-    const { data: congs } = await supabase
-      .from('congregaciones')
-      .select('id, nombre')
-      .order('nombre');
-    congregationsList = congs || [];
-  }
+  await Promise.all(tasks);
 }
 
-export function buildHermanosSelectOptions(selectedName) {
-  const normalizedSelected = (selectedName || '').trim().toLowerCase();
-  return `
-    <option value="">-- Vincular con planilla Hermanos --</option>
-    ${hermanosCongList
-      .map((h) => {
-        const isSelected = (h.nombre || '').trim().toLowerCase() === normalizedSelected;
-        const telInfo =
-          h.celular && !String(h.celular).toLowerCase().includes('sin tel')
-            ? ` (${h.celular})`
-            : ' (sin tel.)';
-        return `<option value="${escapeHtml(h.nombre)}" ${
-          isSelected ? 'selected' : ''
-        }>${escapeHtml(h.nombre)}${escapeHtml(telInfo)}</option>`;
-      })
-      .join('')}
-  `;
-}
+export function renderAdminView(container, onGlobalRefresh) {
+  const showReviews = canManageAnnualReviews();
+  const totalAlerts =
+    (state.reviewAlertsCount?.yellow || 0) + (state.reviewAlertsCount?.red || 0);
+  const hasRedAlert = (state.reviewAlertsCount?.red || 0) > 0;
 
-export function renderAdminView(container, onDataChanged) {
-  const superMode = isSuperadmin();
-  const refreshView = () => renderAdminView(container, onDataChanged);
-
-  const sharedData = {
-    pendingUsers,
-    allCongUsers,
-    pendingReports,
-    congregationsList,
-    hermanosCongList
-  };
+  const subtabs = [
+    { id: 'edificios', label: '🏢 Edificios' },
+    { id: 'poligonos', label: '🗺️ Mapas' },
+    ...(showReviews
+      ? [
+          {
+            id: 'revision',
+            label: totalAlerts > 0 ? `🔔 Revisión (${totalAlerts})` : '🚫 No Visitar',
+            highlight: totalAlerts > 0 ? (hasRedAlert ? 'red' : 'yellow') : null
+          }
+        ]
+      : []),
+    { id: 'importar', label: '📥 Importar' },
+    { id: 'usuarios', label: '👥 Usuarios' },
+    { id: 'general', label: isSuperadmin() ? '🌐 Congregaciones' : '⚙️ General' }
+  ];
 
   container.innerHTML = `
     <div class="space-y-4 pb-24">
-      <div class="grid grid-cols-4 gap-1 bg-slate-200 p-1 rounded-2xl">
-        <button data-subtab="general"
-          class="admin-subtab-btn py-2 rounded-xl text-[11px] font-extrabold transition ${
-            adminSubTab === 'general' ? 'bg-white text-blue-950 shadow-sm' : 'text-slate-600'
-          }">
-          ⚙️ Config
-        </button>
-        <button data-subtab="mapa"
-          class="admin-subtab-btn py-2 rounded-xl text-[11px] font-extrabold transition ${
-            adminSubTab === 'mapa' ? 'bg-white text-blue-950 shadow-sm' : 'text-slate-600'
-          }">
-          🗺️ Polígonos
-        </button>
-        <button data-subtab="usuarios"
-          class="admin-subtab-btn py-2 rounded-xl text-[11px] font-extrabold transition relative ${
-            adminSubTab === 'usuarios' ? 'bg-white text-blue-950 shadow-sm' : 'text-slate-600'
-          }">
-          👥 Usuarios
-          ${
-            pendingUsers.length > 0
-              ? `<span class="ml-0.5 bg-rose-600 text-white text-[10px] px-1.5 py-0.2 rounded-full">${pendingUsers.length}</span>`
-              : ''
-          }
-        </button>
-        <button data-subtab="edificios"
-          class="admin-subtab-btn py-2 rounded-xl text-[11px] font-extrabold transition relative ${
-            adminSubTab === 'edificios' ? 'bg-white text-blue-950 shadow-sm' : 'text-slate-600'
-          }">
-          🏢 Edificios
-          ${
-            pendingReports.length > 0
-              ? `<span class="ml-0.5 bg-amber-500 text-slate-950 text-[10px] px-1.5 py-0.2 rounded-full">${pendingReports.length}</span>`
-              : ''
-          }
-        </button>
+      <!-- Sub-navegación de Administración -->
+      <div class="bg-white p-2 rounded-2xl shadow-sm border border-slate-200 flex gap-1 overflow-x-auto">
+        ${subtabs
+          .map((t) => {
+            const active = activeAdminSubtab === t.id;
+            let extraClass = active
+              ? 'bg-blue-900 text-white'
+              : 'text-slate-600 hover:bg-slate-100';
+            if (!active && t.highlight === 'red') {
+              extraClass = 'bg-rose-50 text-rose-800 border border-rose-200';
+            } else if (!active && t.highlight === 'yellow') {
+              extraClass = 'bg-amber-50 text-amber-900 border border-amber-200';
+            }
+
+            return `
+              <button data-subtab="${t.id}"
+                class="admin-subtab-btn px-3 py-2 rounded-xl text-xs font-extrabold whitespace-nowrap transition ${extraClass}">
+                ${t.label}
+              </button>
+            `;
+          })
+          .join('')}
       </div>
 
-      ${adminSubTab === 'general' ? renderGeneralAdminHtml(superMode, sharedData) : ''}
-      ${adminSubTab === 'mapa' ? renderPolygonMapperHtml() : ''}
-      ${adminSubTab === 'usuarios' ? renderUsersAdminHtml(sharedData) : ''}
-      ${adminSubTab === 'edificios' ? renderBuildingsAdminHtml(sharedData) : ''}
+      <div id="admin-subtab-content"></div>
     </div>
   `;
 
   document.querySelectorAll('.admin-subtab-btn').forEach((btn) => {
     btn.onclick = () => {
-      adminSubTab = btn.getAttribute('data-subtab');
-      refreshView();
+      activeAdminSubtab = btn.getAttribute('data-subtab');
+      renderAdminView(container, onGlobalRefresh);
     };
   });
 
-  if (adminSubTab === 'general') {
-    bindGeneralAdminEvents(refreshView, onDataChanged, superMode);
-  }
-  if (adminSubTab === 'mapa') {
-    bindPolygonMapperEvents(refreshView, onDataChanged);
-  }
-  if (adminSubTab === 'usuarios') {
-    bindUsersAdminEvents(refreshView, onDataChanged, sharedData);
-  }
-  if (adminSubTab === 'edificios') {
-    bindBuildingsAdminEvents(refreshView, onDataChanged, sharedData);
+  const subContainer = document.getElementById('admin-subtab-content');
+
+  if (activeAdminSubtab === 'edificios') {
+    subContainer.innerHTML = renderBuildingsAdminHtml();
+    bindBuildingsAdminEvents(subContainer, async () => {
+      await loadBuildingsAdminData();
+      if (onGlobalRefresh) await onGlobalRefresh();
+    });
+  } else if (activeAdminSubtab === 'poligonos') {
+    subContainer.innerHTML = renderPolygonsAdminHtml();
+    bindPolygonsAdminEvents(subContainer, async () => {
+      await loadPolygonsAdminData();
+      if (onGlobalRefresh) await onGlobalRefresh();
+    });
+  } else if (activeAdminSubtab === 'revision' && showReviews) {
+    renderRevisionAnualView(subContainer, async () => {
+      if (onGlobalRefresh) await onGlobalRefresh();
+    });
+  } else if (activeAdminSubtab === 'importar') {
+    subContainer.innerHTML = renderImportadorHtml();
+    bindImportadorEvents(async () => {
+      await loadBuildingsAdminData();
+      if (onGlobalRefresh) await onGlobalRefresh();
+    });
+  } else if (activeAdminSubtab === 'usuarios') {
+    subContainer.innerHTML = renderUsersAdminHtml();
+    bindUsersAdminEvents(subContainer, async () => {
+      await loadUsersAdminData();
+    });
+  } else if (activeAdminSubtab === 'general') {
+    subContainer.innerHTML = renderGeneralAdminHtml();
+    bindGeneralAdminEvents(subContainer, async () => {
+      await loadGeneralAdminData();
+      if (onGlobalRefresh) await onGlobalRefresh();
+    });
   }
 }
