@@ -1,5 +1,5 @@
 import { supabase } from './supabase.js';
-import { state, isSuperadmin, isAdmin } from './state.js';
+import { state, isSuperadmin, isAdmin, canManageAnnualReviews } from './state.js';
 import {
   loadUserSession,
   signOut,
@@ -13,6 +13,7 @@ import {
   renderManzanasView,
   checkDnvProximityAlert
 } from './manzanas.js';
+import { loadTelephonesBatch, renderTelefonosView } from './telefonos.js';
 import {
   loadSchedulesAndPoints,
   renderSalidasView,
@@ -20,6 +21,7 @@ import {
 } from './salidas.js';
 import { loadStatistics, renderEstadisticasView } from './estadisticas.js';
 import { loadAdminData, renderAdminView } from './admin.js';
+import { loadAnnualReviewData } from './revision-anual.js';
 import { showToast, escapeHtml } from './ui-helpers.js';
 
 let allCongregations = [];
@@ -99,10 +101,13 @@ async function reloadAllData() {
   const tasks = [
     loadBuildings(),
     loadBlocksAndFaces(),
+    loadTelephonesBatch(),
     loadSchedulesAndPoints()
   ];
   if (isAdmin()) {
     tasks.push(loadAdminData(), loadStatistics());
+  } else if (canManageAnnualReviews()) {
+    tasks.push(loadAnnualReviewData());
   }
   await Promise.all(tasks);
 }
@@ -126,7 +131,6 @@ function startGpsWatcher() {
   );
 }
 
-// Solicitud explícita de GPS al tocar "Edificios cerca de mí" o entrar a un edificio
 export function requestOnDemandGps({ silent = false, onSuccess = null } = {}) {
   if (!navigator.geolocation) {
     if (!silent) showToast('Tu dispositivo no soporta GPS', 'error');
@@ -158,7 +162,6 @@ export function requestOnDemandGps({ silent = false, onSuccess = null } = {}) {
   );
 }
 
-// Permite saltar directo a la pestaña Salidas desde Avance / Buscador Urgente
 window.goToSalidasWithTerritories = (territories = []) => {
   if (Array.isArray(territories) && territories.length > 0) {
     state.proposedTerritories = territories.map(String);
@@ -174,21 +177,36 @@ function renderMainShell() {
   const root = document.getElementById('app-root');
   const adminMode = isAdmin();
   const superMode = isSuperadmin();
+  const reviewMode = canManageAnnualReviews();
 
-  // Si el usuario no es admin y quedó en una pestaña restringida, volver a edificios
   if (!adminMode && (state.currentTab === 'estadisticas' || state.currentTab === 'admin')) {
     state.currentTab = 'edificios';
   }
 
+  const redAlerts = state.reviewAlertsCount?.red || 0;
+  const yellowAlerts = state.reviewAlertsCount?.yellow || 0;
+  const totalReviewAlerts = redAlerts + yellowAlerts;
+
   const tabs = [
     { id: 'edificios', icon: '🏢', label: 'Edificios' },
     { id: 'manzanas', icon: '🗺️', label: 'Manzanas' },
+    { id: 'telefonos', icon: '📞', label: 'Teléfonos' },
     { id: 'salidas', icon: '📅', label: 'Salidas' },
     ...(adminMode ? [{ id: 'estadisticas', icon: '📊', label: 'Avance' }] : []),
-    ...(adminMode ? [{ id: 'admin', icon: '⚙️', label: 'Admin' }] : [])
+    ...(adminMode
+      ? [
+          {
+            id: 'admin',
+            icon: '⚙️',
+            label: 'Admin',
+            badge: totalReviewAlerts > 0 ? totalReviewAlerts : null,
+            badgeColor: redAlerts > 0 ? 'bg-rose-600' : 'bg-amber-500'
+          }
+        ]
+      : [])
   ];
 
-  const gridColsClass = adminMode ? 'grid-cols-5' : 'grid-cols-3';
+  const gridColsClass = adminMode ? 'grid-cols-6' : 'grid-cols-4';
 
   root.innerHTML = `
     <div class="min-h-screen flex flex-col bg-slate-100">
@@ -218,10 +236,24 @@ function renderMainShell() {
             }
           </div>
 
-          <button id="btn-logout-main"
-            class="bg-blue-900 hover:bg-blue-800 text-blue-100 text-xs font-bold px-3 py-2 rounded-xl border border-blue-800 shrink-0">
-            Salir
-          </button>
+          <div class="flex items-center gap-2 shrink-0">
+            ${
+              reviewMode && totalReviewAlerts > 0
+                ? `<button id="btn-header-review-alert"
+                    class="${
+                      redAlerts > 0
+                        ? 'bg-rose-600 hover:bg-rose-500 text-white'
+                        : 'bg-amber-400 hover:bg-amber-300 text-slate-950'
+                    } text-xs font-extrabold px-2.5 py-2 rounded-xl shadow-xs transition">
+                    ${redAlerts > 0 ? `🚨 ${redAlerts} venc.` : `⚠️ ${yellowAlerts} rev.`}
+                  </button>`
+                : ''
+            }
+            <button id="btn-logout-main"
+              class="bg-blue-900 hover:bg-blue-800 text-blue-100 text-xs font-bold px-3 py-2 rounded-xl border border-blue-800">
+              Salir
+            </button>
+          </div>
         </div>
       </header>
 
@@ -236,13 +268,20 @@ function renderMainShell() {
               const active = state.currentTab === t.id;
               return `
                 <button data-tab="${t.id}"
-                  class="nav-tab-btn py-2.5 flex flex-col items-center justify-center gap-0.5 transition ${
+                  class="nav-tab-btn relative py-2.5 flex flex-col items-center justify-center gap-0.5 transition ${
                     active
                       ? 'text-blue-900 font-extrabold bg-blue-50/70 border-t-2 border-blue-900'
                       : 'text-slate-500 font-semibold hover:text-slate-800'
                   }">
+                  ${
+                    t.badge
+                      ? `<span class="absolute top-1.5 right-2 ${t.badgeColor} text-white text-[9px] font-black px-1.5 py-0.2 rounded-full">
+                          ${t.badge}
+                        </span>`
+                      : ''
+                  }
                   <span class="text-lg leading-none">${t.icon}</span>
-                  <span class="text-[11px]">${t.label}</span>
+                  <span class="text-[10px] sm:text-[11px]">${t.label}</span>
                 </button>
               `;
             })
@@ -253,6 +292,15 @@ function renderMainShell() {
   `;
 
   document.getElementById('btn-logout-main').onclick = signOut;
+
+  const headerAlertBtn = document.getElementById('btn-header-review-alert');
+  if (headerAlertBtn) {
+    headerAlertBtn.onclick = async () => {
+      state.currentTab = 'admin';
+      await loadAdminData();
+      renderMainShell();
+    };
+  }
 
   const superSelect = document.getElementById('superadmin-cong-select');
   if (superSelect) {
@@ -278,7 +326,9 @@ function renderMainShell() {
       const tab = btn.getAttribute('data-tab');
       if ((tab === 'estadisticas' || tab === 'admin') && !isAdmin()) return;
       state.currentTab = tab;
-      if (tab === 'estadisticas') {
+      if (tab === 'telefonos') {
+        await loadTelephonesBatch();
+      } else if (tab === 'estadisticas') {
         await loadStatistics();
       } else if (tab === 'admin') {
         await loadAdminData();
@@ -292,6 +342,8 @@ function renderMainShell() {
     renderEdificiosView(content);
   } else if (state.currentTab === 'manzanas') {
     renderManzanasView(content);
+  } else if (state.currentTab === 'telefonos') {
+    renderTelefonosView(content);
   } else if (state.currentTab === 'salidas') {
     renderSalidasView(content);
   } else if (state.currentTab === 'estadisticas' && adminMode) {
